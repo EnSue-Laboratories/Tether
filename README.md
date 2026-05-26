@@ -14,14 +14,15 @@ teaches the agent when/how to use it.
 
 ## Layout
 - **`docs/DESIGN.md`** — the contract: data model, extension↔daemon protocol, CLI surface, limits, security.
-- **`skill/SKILL.md`** — the agent-facing guide (when/how to use `tether`).
+- **`skills/codex/tether/`** — installable Codex Skill that teaches Codex agents when/how to use `tether`.
+- **`skills/claude-code/tether/`** — installable Claude Code Skill (runtime-specific; maintained separately).
 - **`extension/`** — MV3 browser extension (TypeScript, English UI) — *Claude*.
 - **`src/`** — Rust daemon + CLI (`tether daemon` / `tether`) — *Codex*.
 
 ## Status
-**Phase 1 — Rust daemon/CLI core in progress.** The current CLI/daemon implements the local Unix
-socket query path, Native Messaging ingest, per-session buffers, and the first read commands.
-Extension capture/UI wiring follows against this interface.
+**Phase 1 — end-to-end code path complete.** The repo includes the MV3 extension, Rust daemon/CLI,
+native-host install path, and installable agent Skill. Remaining validation is real-browser GUI
+acceptance on a machine with Chrome/Chromium.
 
 ## Development
 ```sh
@@ -41,3 +42,23 @@ rustup toolchain first:
 ```sh
 export PATH="$HOME/.cargo/bin:$PATH"
 ```
+
+## Install Agent Skills
+Install the skill that matches the agent runtime.
+
+From a checkout:
+
+```sh
+skills/install.sh --target codex
+skills/install.sh --target claude-code
+```
+
+Or install the Codex skill directly from GitHub:
+
+```sh
+python /path/to/skill-installer/scripts/install-skill-from-github.py \
+  --repo EnSue-Laboratories/Tether \
+  --path skills/codex/tether
+```
+
+Restart the agent runtime after installation so `$tether` is discovered.

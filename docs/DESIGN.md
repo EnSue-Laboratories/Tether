@@ -33,8 +33,9 @@ Three layers, one source of truth:
 2. **`tetherd` daemon / native host** (Rust, single binary — *implemented by Codex*). Receives
    events from the extension, holds bounded per-session ring buffers, answers queries, exports.
    **The source of truth.**
-3. **`tether` CLI** (Rust, same binary — *Codex*) + **`SKILL.md`** (this repo). The CLI is the
-   agent-facing query surface; the Skill tells the agent when to reach for it.
+3. **`tether` CLI** (Rust, same binary — *Codex*) + installable runtime-specific Skills
+   (`skills/codex/tether/SKILL.md`, `skills/claude-code/tether/SKILL.md`). The CLI is the
+   agent-facing query surface; the Skills tell each agent runtime when to reach for it.
 
 Why a daemon at all: a browser extension is sandboxed and cannot be reached directly by a shell
 agent, and it cannot open a listening socket. Native Messaging lets the browser launch `tetherd`
@@ -227,7 +228,7 @@ Tether is default-safe so the agent never accidentally surfaces them:
 
 ## 7. Implementation phases
 
-**Phase 0 (merged):** this design, the `SKILL.md` (agent guide), and the `extension/` skeleton
+**Phase 0 (merged):** this design, installable agent Skills, and the `extension/` skeleton
 (MV3 manifest + capture/UI stubs with TODOs, English UI).
 
 **Phase 1 (Codex):** the Rust `tetherd` + `tether` implementing §3–§5: Native Messaging ingest,

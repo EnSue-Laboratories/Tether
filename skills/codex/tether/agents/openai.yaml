@@ -1,0 +1,4 @@
+interface:
+  display_name: "Tether"
+  short_description: "Read browser console and network logs"
+  default_prompt: "Use $tether to inspect recent browser console errors and failed network requests."

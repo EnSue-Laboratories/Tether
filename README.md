@@ -30,6 +30,9 @@ cargo build
 
 # Local daemon without a browser native-host stdin/stdout:
 tether daemon --no-native
+
+# Install the Chrome/Chromium native-host manifest for the extension:
+tether install-host
 ```
 
 Requires Rust 1.95+ / Cargo lockfile v4. On machines with multiple Cargo installs, prefer the

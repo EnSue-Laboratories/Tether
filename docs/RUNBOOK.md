@@ -20,9 +20,9 @@ npm install && npm run build            # produces background.js + popup/popup.j
 ## 3. Install the native-messaging host
 Lets Chrome launch the daemon when the extension connects. Either:
 ```sh
-native-host/install.sh target/release/tether      # script (fallback)
-# or, once available:
-tether install-host                                # official CLI entry (resolves its own path)
+target/release/tether install-host                # official CLI entry, resolves its own path
+# or:
+native-host/install.sh target/release/tether      # transparent fallback script
 ```
 This writes `com.ensue.tether.json` into Chrome's `NativeMessagingHosts/` dir and creates a
 `tetherd` symlink next to the binary (the daemon enters native-host mode only when argv0 ends with

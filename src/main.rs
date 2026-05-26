@@ -7,6 +7,7 @@ use std::collections::{HashMap, VecDeque};
 use std::env;
 use std::fs;
 use std::io::{self, Read, Write};
+use std::os::unix::fs as unix_fs;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -18,6 +19,8 @@ const PROTOCOL_VERSION: u64 = 1;
 const DEFAULT_EVENTS_PER_SESSION: usize = 5000;
 const DEFAULT_BYTES_PER_SESSION: usize = 8 * 1024 * 1024;
 const DEFAULT_BODY_MAX_BYTES: usize = 64 * 1024;
+const NATIVE_HOST_NAME: &str = "com.ensue.tether";
+const EXTENSION_ID: &str = "lcbgiapgidfgdaohjbofohaokokcpefd";
 
 #[derive(Parser)]
 #[command(name = "tether", about = "Browser console and network logs for agents")]
@@ -46,6 +49,8 @@ enum Command {
     Export(ExportArgs),
     /// View or update config.
     Config(ConfigArgs),
+    /// Install the Chrome/Chromium Native Messaging host manifest.
+    InstallHost(InstallHostArgs),
 }
 
 #[derive(Args)]
@@ -139,6 +144,26 @@ struct ConfigArgs {
     value: Option<String>,
     #[arg(long)]
     json: bool,
+}
+
+#[derive(Args, Clone)]
+struct InstallHostArgs {
+    /// Path to the tether binary. Defaults to the currently-running executable.
+    #[arg(long)]
+    binary: Option<PathBuf>,
+    /// Only print what would be written.
+    #[arg(long)]
+    dry_run: bool,
+    /// Browser target: chrome, chromium, or all.
+    #[arg(long, value_enum, default_value_t = BrowserTarget::All)]
+    browser: BrowserTarget,
+}
+
+#[derive(Copy, Clone, Eq, PartialEq, ValueEnum)]
+enum BrowserTarget {
+    All,
+    Chrome,
+    Chromium,
 }
 
 #[derive(Debug, Deserialize)]
@@ -728,6 +753,7 @@ fn run_cli(command: Command) -> Result<ExitCode> {
             args.json,
             |data| println!("{}", serde_json::to_string_pretty(data).unwrap()),
         ),
+        Command::InstallHost(args) => install_host(args),
         Command::Daemon(_) => unreachable!(),
     }
 }
@@ -1138,6 +1164,87 @@ fn status_matches(status: Option<i64>, filter: &str) -> bool {
     }
 }
 
+fn install_host(args: InstallHostArgs) -> Result<ExitCode> {
+    let tether_bin = absolutize_path(args.binary.unwrap_or(env::current_exe()?))?;
+    let tetherd = tether_bin
+        .parent()
+        .ok_or_else(|| anyhow!("binary has no parent directory"))?
+        .join("tetherd");
+    let manifest = native_host_manifest(&tetherd)?;
+    let targets = native_host_dirs(args.browser)?;
+
+    if args.dry_run {
+        println!("tether: {}", tether_bin.display());
+        println!("tetherd: {}", tetherd.display());
+        for dir in &targets {
+            println!(
+                "manifest: {}",
+                dir.join(format!("{NATIVE_HOST_NAME}.json")).display()
+            );
+        }
+        println!("{manifest}");
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    if tetherd != tether_bin {
+        let _ = fs::remove_file(&tetherd);
+        unix_fs::symlink(&tether_bin, &tetherd)
+            .with_context(|| format!("create symlink {}", tetherd.display()))?;
+    }
+
+    for dir in &targets {
+        fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+        let path = dir.join(format!("{NATIVE_HOST_NAME}.json"));
+        fs::write(&path, &manifest).with_context(|| format!("write {}", path.display()))?;
+        println!("installed: {}", path.display());
+    }
+    println!("host '{NATIVE_HOST_NAME}' -> {}", tetherd.display());
+    println!("allowed extension id: {EXTENSION_ID}");
+    Ok(ExitCode::SUCCESS)
+}
+
+fn native_host_manifest(tetherd: &PathBuf) -> Result<String> {
+    Ok(serde_json::to_string_pretty(&json!({
+        "name": NATIVE_HOST_NAME,
+        "description": "Tether daemon — native messaging host (receives console/network events from the extension).",
+        "path": tetherd,
+        "type": "stdio",
+        "allowed_origins": [format!("chrome-extension://{EXTENSION_ID}/")],
+    }))?)
+}
+
+fn native_host_dirs(target: BrowserTarget) -> Result<Vec<PathBuf>> {
+    let home = PathBuf::from(env::var("HOME").context("HOME unset")?);
+    let mut dirs = Vec::new();
+    #[cfg(target_os = "macos")]
+    {
+        if matches!(target, BrowserTarget::All | BrowserTarget::Chrome) {
+            dirs.push(home.join("Library/Application Support/Google/Chrome/NativeMessagingHosts"));
+        }
+        if matches!(target, BrowserTarget::All | BrowserTarget::Chromium) {
+            dirs.push(home.join("Library/Application Support/Chromium/NativeMessagingHosts"));
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        if matches!(target, BrowserTarget::All | BrowserTarget::Chrome) {
+            dirs.push(home.join(".config/google-chrome/NativeMessagingHosts"));
+        }
+        if matches!(target, BrowserTarget::All | BrowserTarget::Chromium) {
+            dirs.push(home.join(".config/chromium/NativeMessagingHosts"));
+        }
+    }
+    Ok(dirs)
+}
+
+fn absolutize_path(path: PathBuf) -> Result<PathBuf> {
+    if path.is_absolute() {
+        Ok(path)
+    } else {
+        Ok(env::current_dir()?.join(path))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1291,5 +1398,27 @@ mod tests {
         assert_eq!(parse_duration("5m"), Some(Duration::from_secs(300)));
         assert_eq!(parse_duration("1h"), Some(Duration::from_secs(3600)));
         assert_eq!(parse_duration("bogus"), None);
+    }
+
+    #[test]
+    fn native_host_manifest_contains_extension_id_and_path() {
+        let manifest = native_host_manifest(&PathBuf::from("/tmp/tetherd")).unwrap();
+        let value: Value = serde_json::from_str(&manifest).unwrap();
+        assert_eq!(
+            value.get("name").and_then(Value::as_str),
+            Some(NATIVE_HOST_NAME)
+        );
+        assert_eq!(
+            value.get("path").and_then(Value::as_str),
+            Some("/tmp/tetherd")
+        );
+        assert_eq!(
+            value
+                .get("allowed_origins")
+                .and_then(Value::as_array)
+                .and_then(|a| a.first())
+                .and_then(Value::as_str),
+            Some("chrome-extension://lcbgiapgidfgdaohjbofohaokokcpefd/")
+        );
     }
 }

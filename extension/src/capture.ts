@@ -20,7 +20,7 @@ export interface ConsoleEvent extends Envelope {
   args?: string[];
   stack?: string;
   url?: string;
-  source: "console-api" | "exception";
+  source: "console-api" | "exception" | "network-error" | "browser-log";
 }
 export interface NetworkEvent extends Envelope {
   type: "network";
@@ -148,6 +148,45 @@ export function mapExceptionThrown(p: CdpExceptionThrown, ctx: CaptureContext, p
     text: d.text || d.exception?.description || "Uncaught exception",
     stack: stackText(d.stackTrace) ?? d.exception?.description,
     url: d.url ?? pageUrl, source: "exception"
+  };
+}
+
+/* CDP `Log.entryAdded` — browser-level diagnostics that don't come through Runtime:
+ * network/CORS failures, CSS parse warnings, deprecations, mixed content, interventions, etc.
+ * `source: "javascript"` entries are skipped because Runtime.exceptionThrown already covers them. */
+type CdpLogSource =
+  | "xml" | "javascript" | "network" | "storage" | "appcache" | "rendering" | "security"
+  | "deprecation" | "worker" | "violation" | "intervention" | "recommendation" | "other";
+interface CdpLogEntry {
+  source: CdpLogSource;
+  level: "verbose" | "info" | "warning" | "error";
+  text: string;
+  category?: string;
+  timestamp: number;
+  url?: string;
+  lineNumber?: number;
+  stackTrace?: CdpStackTrace;
+  networkRequestId?: string;
+  args?: CdpRemoteObject[];
+}
+interface CdpLogEntryAdded { entry: CdpLogEntry; }
+
+const LOG_LEVELS: Record<CdpLogEntry["level"], ConsoleLevel> = {
+  verbose: "debug", info: "info", warning: "warn", error: "error"
+};
+
+export function mapLogEntryAdded(p: CdpLogEntryAdded, ctx: CaptureContext, pageUrl?: string): ConsoleEvent | null {
+  if (!ctx.config.capture.console) return null;
+  const e = p.entry;
+  if (e.source === "javascript") return null; // covered by Runtime.exceptionThrown
+  const args = e.args?.map(argText);
+  return {
+    ...envelope(ctx, "console", e.timestamp), type: "console",
+    level: LOG_LEVELS[e.level] ?? "log",
+    text: `[${e.source}${e.category ? ":" + e.category : ""}] ${e.text}`,
+    args, stack: stackText(e.stackTrace),
+    url: e.url ?? pageUrl,
+    source: e.source === "network" ? "network-error" : "browser-log"
   };
 }
 

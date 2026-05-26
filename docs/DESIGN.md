@@ -76,9 +76,12 @@ Two shapes of the same event, to keep ownership unambiguous:
   "args": ["...", 3, {"...": "..."}],   // structured args when serializable (size-capped)
   "stack": "at foo (app.js:12:5)\n...",  // present for error/trace
   "url": "https://app.example.com/checkout",
-  "source": "console-api" | "exception" | "network-error"
+  "source": "console-api" | "exception" | "network-error" | "browser-log"
 }
 ```
+`network-error` and `browser-log` are produced from Chrome's `Log.entryAdded` CDP domain for
+browser-level diagnostics that do not originate from page JavaScript, such as CORS/network
+failures, CSS parser warnings, deprecations, mixed content, and interventions.
 
 ### Network event (`type: "network"`)
 One logical request emits a `request` phase and later a `response` (or `failed`) phase, correlated

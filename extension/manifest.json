@@ -3,6 +3,7 @@
   "name": "Tether",
   "version": "0.0.1",
   "description": "Stream the browser's console and network logs to a local agent via the Tether daemon.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA4kcK04keCZvB4Jrbd76MeoDMVQ3lcfcNizEeUZojx6mPBsgrDeSPiCp74bltrd11GQuTQOtfUcYAAJ+nPjru5vYcLYS5NnfRnUg9MSLHOej5x5deWhpkfXEtYGQzWx07QIFJMrKzgG51JFgpYynriyn1p47C77jojoPXUw7ukV8yIlcIZhhdKDeg8YZbzh1jLkzrVNWcyGjN7KYrpesOi4tZBp21xLuM9sRrpHO0207Uc53UftPdBYAQsEYt7jrcag1aVY/p5zZpJpsxm+/vju/lnnBwB7qWtHkpULahMVy0VB1CI1CKI4vvQ7yYbjxMVrd4nQFIXPKUozyTrZTa+QIDAQAB",
   "minimum_chrome_version": "116",
   "permissions": ["debugger", "nativeMessaging", "tabs", "storage"],
   "host_permissions": ["<all_urls>"],

@@ -11,7 +11,8 @@
 
 import {
   CaptureConfig, CaptureContext, ControlMessage, DEFAULT_CONFIG, IngestEvent, IngestMessage,
-  mapConsoleApiCalled, mapExceptionThrown, mapLoadingFailed, mapRequestWillBeSent, mapResponseReceived
+  mapConsoleApiCalled, mapExceptionThrown, mapLoadingFailed, mapLogEntryAdded,
+  mapRequestWillBeSent, mapResponseReceived
 } from "./capture.js";
 import { PopupRequest, TabState } from "./messages.js";
 
@@ -88,6 +89,7 @@ function enableCapture(tabId: number): void {
     counts.set(tabId, { console: 0, network: 0 });
     chrome.debugger.sendCommand({ tabId }, "Runtime.enable");
     chrome.debugger.sendCommand({ tabId }, "Network.enable");
+    chrome.debugger.sendCommand({ tabId }, "Log.enable");
     connectDaemon();
     chrome.tabs.get(tabId, (tab) => {
       void chrome.runtime.lastError;
@@ -119,6 +121,7 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
   switch (method) {
     case "Runtime.consoleAPICalled": emit(mapConsoleApiCalled(p, ctx, pageUrl)); break;
     case "Runtime.exceptionThrown":  emit(mapExceptionThrown(p, ctx, pageUrl)); break;
+    case "Log.entryAdded":           emit(mapLogEntryAdded(p, ctx, pageUrl)); break;
     case "Network.requestWillBeSent": emit(mapRequestWillBeSent(p, ctx)); break;
     case "Network.responseReceived":  emit(mapResponseReceived(p, ctx)); break;
     case "Network.loadingFailed":     emit(mapLoadingFailed(p, ctx)); break;

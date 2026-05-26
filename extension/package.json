@@ -1,0 +1,16 @@
+{
+  "name": "tether-extension",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Tether MV3 extension — captures console + network and streams to the tetherd daemon.",
+  "scripts": {
+    "build": "node build.mjs",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.0.270",
+    "esbuild": "^0.21.5",
+    "typescript": "^5.4.5"
+  }
+}

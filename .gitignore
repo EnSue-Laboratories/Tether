@@ -1,7 +1,6 @@
 # Rust (tetherd / tether CLI — implemented by Codex)
 /target
 **/*.rs.bk
-Cargo.lock
 
 # Node / extension build
 node_modules/

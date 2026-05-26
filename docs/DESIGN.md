@@ -222,11 +222,12 @@ Tether is default-safe so the agent never accidentally surfaces them:
 
 ---
 
-## 7. Phase 0 scope (this PR) vs. follow-on
+## 7. Implementation phases
 
-**This PR (Claude):** this design, the `SKILL.md` (agent guide), and the `extension/` skeleton
-(MV3 manifest + capture/UI stubs with TODOs, English UI). No daemon/CLI code.
+**Phase 0 (merged):** this design, the `SKILL.md` (agent guide), and the `extension/` skeleton
+(MV3 manifest + capture/UI stubs with TODOs, English UI).
 
-**Next (Codex), after this merges:** the Rust `tetherd` + `tether` implementing §3–§5. Then Claude
-fills in the extension capture/UI against the daemon, and we cross-review. `tether watch` and HAR
-export can land in a follow-up after the core query path works.
+**Phase 1 (Codex):** the Rust `tetherd` + `tether` implementing §3–§5: Native Messaging ingest,
+local Unix socket query API, bounded buffers, and the first usable CLI commands. Then Claude fills
+in the extension capture/UI against the daemon, and we cross-review. `tether watch` and HAR export
+can land in a follow-up after the core query path works.

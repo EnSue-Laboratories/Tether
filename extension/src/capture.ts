@@ -4,7 +4,9 @@
 
 export type TetherEvent = ConsoleEvent | NetworkEvent | SessionEvent;
 
-interface Envelope { type: "console" | "network" | "session"; ts: number; tabId: number; sessionId: string; seq: number; }
+/* The extension emits *ingest* events (DESIGN.md §3.1): sessionId is extension-owned; `seq` is
+ * stamped by the daemon on ingest and is NOT sent from here. */
+interface Envelope { type: "console" | "network" | "session"; ts: number; tabId: number; sessionId: string; }
 export interface ConsoleEvent extends Envelope { type: "console"; level: string; text: string; args?: unknown[]; stack?: string; url?: string; source: string; }
 export interface NetworkEvent extends Envelope { type: "network"; requestId: string; phase: "request" | "response" | "failed"; method?: string; url: string; resourceType?: string; status?: number; statusText?: string; mimeType?: string; requestHeaders?: Record<string, string>; responseHeaders?: Record<string, string>; durationMs?: number; fromCache?: boolean; errorText?: string; }
 export interface SessionEvent extends Envelope { type: "session"; event: "opened" | "navigated" | "closed"; url?: string; title?: string; }

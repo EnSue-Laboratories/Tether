@@ -44,18 +44,26 @@ and exchange JSON over stdio; `tetherd` outlives individual CLI calls and holds 
 
 ## 2. Data model (event schema)
 
-All events are JSON objects with a common envelope. `ts` is Unix epoch milliseconds. `sessionId`
-is a daemon-assigned id for one tab's lifetime (survives same-tab navigations until the tab closes);
-`tabId` is Chrome's tab id. Field names are stable — the CLI `--json` output returns these verbatim.
+Events are JSON objects sharing a common envelope. `ts` is Unix epoch milliseconds; `tabId` is
+Chrome's tab id. **`sessionId` is minted by the extension** when it starts capturing a tab and is
+stable for that tab's lifetime (survives same-tab navigations, ends when the tab closes).
+**`seq` is stamped by the daemon** on ingest — a per-session monotonic counter that orders the stored
+buffer and backs CLI cursors.
 
-### Common envelope
+Two shapes of the same event, to keep ownership unambiguous:
+- **Ingest event** (extension → daemon, §3.1): the envelope **without `seq`** — `type`, `ts`, `tabId`,
+  `sessionId` — plus the event-specific fields below. The extension never sends `seq`.
+- **Stored event** (daemon buffer; CLI `--json` output, §4): the ingest event **plus the
+  daemon-stamped `seq`**. Field names are stable and returned verbatim.
+
+### Common envelope (stored shape)
 ```jsonc
 {
   "type": "console" | "network" | "session",
   "ts": 1716690000123,
   "tabId": 42,
-  "sessionId": "s_01H...",
-  "seq": 1024            // per-session monotonic sequence (ordering + cursors)
+  "sessionId": "s_01H...",   // extension-owned, stable per tab lifetime
+  "seq": 1024                // daemon-stamped on ingest; stored events only (absent on the wire from the extension)
 }
 ```
 
@@ -108,14 +116,22 @@ by `requestId`. Bodies are **optional and size-capped** (see §5) and **redacted
 
 ---
 
-## 3. Extension ↔ daemon protocol (Native Messaging)
+## 3. Transports
+
+One single binary runs two ways: as the **daemon** (`tetherd`, launched by the browser as the native
+messaging host) and as the **`tether` CLI**. It speaks two transports — Native Messaging to the
+extension, and a local Unix socket to the CLI. `v` is the protocol version on every message (bump on
+breaking changes); both sides tolerate unknown fields so they can be upgraded independently.
+
+### 3.1 Extension ↔ daemon (Native Messaging)
 
 Chrome Native Messaging framing: each message is a little-endian **uint32 length** followed by that
 many bytes of **UTF-8 JSON**. Two directions:
 
-**Extension → daemon** (`ingest`): batches of the events in §2.
+**Extension → daemon** (`ingest`): batches of **ingest events** (§2 — `sessionId` present, no `seq`).
+The daemon stamps `seq` per session on receipt, in arrival order, before buffering.
 ```jsonc
-{ "v": 1, "kind": "events", "events": [ /* console|network|session */ ] }
+{ "v": 1, "kind": "events", "events": [ /* ingest console|network|session events */ ] }
 ```
 
 **Daemon → extension** (`control`): capture configuration + lifecycle.
@@ -127,8 +143,30 @@ many bytes of **UTF-8 JSON**. Two directions:
   "filter":  { "urlAllow": [], "urlDeny": [] } }
 ```
 
-`v` is the protocol version (bump on breaking changes). The daemon is tolerant of unknown fields so
-the extension and daemon can be upgraded independently.
+### 3.2 CLI ↔ daemon (local Unix socket)
+
+The daemon also listens on a **Unix domain socket** so `tether` invocations can query it. Default
+path `$XDG_RUNTIME_DIR/tether.sock`, fallback `$HOME/.tether/tether.sock`, overridable via
+`TETHER_SOCK`. (Linux/macOS first, matching the target boxes; a Windows named-pipe variant is future
+work.) One request object per connection:
+
+**Request** (CLI → daemon):
+```jsonc
+{ "v": 1, "cmd": "console", "session": "s_01H..."|null,
+  "args": { "since": "2m", "level": ["error","warn"], "grep": "checkout", "limit": 200 } }
+```
+`cmd` ∈ { `status`, `sessions`, `console`, `net`, `get`, `clear`, `export`, `config`, `watch` };
+`session` null = most recently active; `args` mirror the §4 flags.
+
+**Response** (daemon → CLI):
+- **Unary** (`status`/`sessions`/`get`/`clear`/`config`): one JSON object —
+  `{ "ok": true, "data": ... }` or `{ "ok": false, "code": "NO_SESSION", "message": "..." }`.
+- **Streaming** (`console`/`net`/`export`/`watch`): a header line `{ "ok": true, "stream": true }`
+  then **one stored event per line (JSONL)**; `watch` stays open and appends live events until the
+  CLI disconnects.
+
+Error `code` → CLI exit code: socket missing/refused → `3`; `NO_EXTENSION` → `4`; `NO_SESSION` → `5`;
+anything else → `1`.
 
 ---
 

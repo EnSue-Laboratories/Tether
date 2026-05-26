@@ -1,0 +1,7 @@
+{
+  "name": "com.ensue.tether",
+  "description": "Tether daemon — native messaging host (receives console/network events from the extension).",
+  "path": "TETHERD_PATH",
+  "type": "stdio",
+  "allowed_origins": ["chrome-extension://lcbgiapgidfgdaohjbofohaokokcpefd/"]
+}

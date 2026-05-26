@@ -56,6 +56,6 @@ Treat logs as sensitive. Tether redacts common secret headers by default, but co
 
 ## Current Limits
 
-- `export --format json` is available; HAR export is planned.
+- `export --format json` and `export --format har` are available.
 - `watch` and config mutation are planned.
-- Request/response bodies are only present when capture is configured to include them.
+- Request/response bodies are captured by default, size-capped, and should be treated as sensitive.

@@ -85,13 +85,16 @@ browser-level diagnostics that do not originate from page JavaScript, such as CO
 failures, CSS parser warnings, deprecations, mixed content, and interventions.
 
 ### Network event (`type: "network"`)
-One logical request emits a `request` phase and later a `response` (or `failed`) phase, correlated
-by `requestId`. Bodies are **optional and size-capped** (see §5) and **redacted** (see §6).
+One logical request emits correlated phases by `requestId`: `request`, `response`, `finished`,
+optional `body`, or `failed`. WebSocket requests additionally emit handshake/frame/close phases.
+Bodies are **captured by default, size-capped** (see §5), and should be treated as sensitive.
 ```jsonc
 {
   "...envelope": "...",
   "requestId": "r_5567",
-  "phase": "request" | "response" | "failed",
+  "phase": "request" | "response" | "finished" | "body" | "failed" |
+           "ws-open" | "ws-handshake" | "ws-frame-sent" | "ws-frame-recv" |
+           "ws-frame-error" | "ws-close",
   "method": "GET" | "POST" | ...,
   "url": "https://api.example.com/v1/cart",
   "resourceType": "xhr" | "fetch" | "document" | "script" | "image" | ...,
@@ -100,10 +103,15 @@ by `requestId`. Bodies are **optional and size-capped** (see §5) and **redacted
   "mimeType": "application/json",
   "requestHeaders": { "...": "..." },   // redacted
   "responseHeaders": { "...": "..." },  // redacted
-  "requestBody":  { "truncated": false, "text": "..." },   // optional
-  "responseBody": { "truncated": true,  "text": "...", "size": 184320 },  // optional
+  "postData": "...",             // request phase, optional, size-capped
+  "body": "...",                 // body phase, optional, size-capped
+  "bodyBase64": true,            // body phase, binary payload marker
+  "encodedDataLength": 184320,   // finished phase, transfer size
+  "timing": { "...": 0 },         // response phase, CDP timing block when present
+  "initiator": { "...": "..." },  // request phase
   "durationMs": 1843,
   "fromCache": false,
+  "payloadData": "...",          // WebSocket frame phases, size-capped
   "errorText": "net::ERR_CONNECTION_REFUSED"   // failed only
 }
 ```
@@ -141,7 +149,7 @@ The daemon stamps `seq` per session on receipt, in arrival order, before bufferi
 **Daemon → extension** (`control`): capture configuration + lifecycle.
 ```jsonc
 { "v": 1, "kind": "control",
-  "capture": { "console": true, "network": true, "bodies": false },
+  "capture": { "console": true, "network": true, "bodies": true },
   "limits":  { "perSessionEvents": 5000, "bodyMaxBytes": 65536 },
   "redact":  { "headers": ["authorization","cookie","set-cookie","proxy-authorization"] },
   "filter":  { "urlAllow": [], "urlDeny": [] } }
@@ -201,22 +209,25 @@ These let the Skill/agent branch cleanly (e.g. "daemon down → tell the human t
 
 - **Per-session ring buffer**, capped by event count (`perSessionEvents`, default 5000) **and** total
   bytes; oldest events drop first. No unbounded growth.
-- **Bodies are opt-in** (`capture.bodies`, default **off**) and size-capped (`bodyMaxBytes`, default
-  64 KiB); larger bodies are stored truncated with the original `size` recorded.
+- **Bodies are captured by default** (`capture.bodies`, default **on**) and size-capped
+  (`bodyMaxBytes`, default 64 KiB); larger bodies are stored truncated with the original size or
+  transfer size recorded when CDP provides it.
 - Closed sessions are retained briefly (configurable TTL) so the agent can still read logs right
   after a tab closes, then evicted.
 
-## 6. Security & privacy (default-safe)
+## 6. Security & privacy (local-first, sensitive by design)
 
 Console and network logs routinely contain **secrets** (auth tokens, cookies, session ids, PII).
-Tether is default-safe so the agent never accidentally surfaces them:
+Tether favors complete local debugging evidence, so the agent must handle captured output as
+sensitive:
 
 - **Capture is opt-in / off by default.** The human enables it per the extension toggle; nothing is
   captured silently.
 - **Header redaction on by default**: `authorization`, `cookie`, `set-cookie`, `proxy-authorization`
   are replaced with `«redacted»` before leaving the extension. The denylist is configurable/extensible.
-- **Bodies off by default** (§5); when enabled they are size-capped and subject to the same redaction
-  pass for known token-shaped fields.
+- **Bodies are on by default** (§5) to preserve debugging parity with DevTools/HAR. They are
+  size-capped, but body contents are not generally redacted. Treat body output and HAR exports as
+  sensitive local artifacts.
 - **URL allow/deny filters** so capture can be scoped to the app under test.
 - Everything stays **local** (extension ↔ `tetherd` over stdio; CLI ↔ daemon local IPC). No network
   egress, no telemetry.
@@ -232,6 +243,6 @@ Tether is default-safe so the agent never accidentally surfaces them:
 (MV3 manifest + capture/UI stubs with TODOs, English UI).
 
 **Phase 1 (Codex):** the Rust `tetherd` + `tether` implementing §3–§5: Native Messaging ingest,
-local Unix socket query API, bounded buffers, and the first usable CLI commands. Then Claude fills
-in the extension capture/UI against the daemon, and we cross-review. `tether watch` and HAR export
-can land in a follow-up after the core query path works.
+local Unix socket query API, bounded buffers, usable CLI commands, and HAR export. Then Claude fills
+in the extension capture/UI against the daemon, and we cross-review. `tether watch` and config
+mutation can land in follow-ups after the core query path works.

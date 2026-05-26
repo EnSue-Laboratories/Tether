@@ -52,7 +52,8 @@ tether net --status 5xx --since 5m             # recent server errors
 tether net --status 4xx --type xhr,fetch       # failed API calls
 tether get <requestId> --headers               # full detail (all phases) of one request
 tether clear                                   # reset before a clean repro
-tether export --format json -o session.json    # export the session
+tether export --format json -o session.json    # export raw Tether events
+tether export --format har -o session.har      # export HAR 1.2 for DevTools/HAR viewers
 ```
 Exit codes for branching: **3** daemon down, **4** extension not connected, **5** no matching session.
 
@@ -64,6 +65,6 @@ Exit codes for branching: **3** daemon down, **4** extension not connected, **5*
 
 ## Security
 Console/network logs can contain tokens, cookies, and PII. Tether redacts sensitive headers
-(`authorization`/`cookie`/…) in the extension before events leave the browser, and request bodies are
-off by default — but still **summarize findings (status codes, error text, failing URL) rather than
-pasting raw `tether` / `tether export` output into shared channels**.
+(`authorization`/`cookie`/…) in the extension before events leave the browser. Request and response
+bodies are captured by default and size-capped, so **summarize findings (status codes, error text,
+failing URL) rather than pasting raw `tether` / `tether export` output into shared channels**.

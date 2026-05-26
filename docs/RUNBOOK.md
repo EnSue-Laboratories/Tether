@@ -57,8 +57,9 @@ folder. Confirm the id is `lcbgiapgidfgdaohjbofohaokokcpefd` (must match the hos
 - **Exit codes** (for scripting the agent): `3` daemon not running, `4` extension not connected,
   `5` no matching session.
 - **Security**: sensitive headers (`authorization`/`cookie`/…) are redacted in the extension before
-  events leave the browser; request bodies are off by default. Still summarize findings rather than
-  pasting raw `tether export` output into shared channels.
+  events leave the browser; request and response bodies are captured by default and size-capped.
+  Treat exports as sensitive local artifacts and summarize findings rather than pasting raw
+  `tether export` output into shared channels.
 - **Already verified at the CLI seam** (no browser needed): feeding the daemon Native-Messaging-framed
   events in the extension's exact schema and reading them back through every CLI command (incl.
   daemon-stamped `seq` and the `3`/`5` exit codes). The remaining unverified link is real Chrome CDP

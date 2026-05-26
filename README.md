@@ -1,5 +1,7 @@
 # Tether
 
+[中文 README](README.zh-CN.md)
+
 Browser **console + network logs** for AI agents — so an agent can read what happened in the page
 instead of you manually capturing it. A browser extension streams console and network events to a
 local daemon; agents read them through a small `tether` CLI, guided by a Skill.

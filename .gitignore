@@ -6,6 +6,9 @@
 node_modules/
 dist/
 *.zip
+# esbuild outputs (run `npm run build` in extension/)
+/extension/background.js
+/extension/popup/popup.js
 
 # Editor / OS
 .DS_Store

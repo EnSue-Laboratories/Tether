@@ -1,0 +1,27 @@
+<!doctype html>
+<!-- Tether popup — minimal English UI (Phase 0 skeleton): status, capture toggle, current
+     tab/session, recent event counts. No dashboard (per design). -->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      body { font: 13px/1.4 system-ui, sans-serif; width: 260px; margin: 0; padding: 12px; }
+      h1 { font-size: 14px; margin: 0 0 8px; }
+      .row { display: flex; justify-content: space-between; padding: 3px 0; }
+      .muted { color: #666; }
+      .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #c00; }
+      .dot.on { background: #0a0; }
+      button { width: 100%; margin-top: 10px; padding: 6px; }
+    </style>
+  </head>
+  <body>
+    <h1>Tether</h1>
+    <div class="row"><span>Daemon</span><span><span id="daemon-dot" class="dot"></span> <span id="daemon-text">disconnected</span></span></div>
+    <div class="row"><span>Tab</span><span id="tab-url" class="muted">—</span></div>
+    <div class="row"><span>Session</span><span id="session-id" class="muted">—</span></div>
+    <div class="row"><span>Console events</span><span id="console-count">0</span></div>
+    <div class="row"><span>Network events</span><span id="network-count">0</span></div>
+    <button id="toggle">Start capturing this tab</button>
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>

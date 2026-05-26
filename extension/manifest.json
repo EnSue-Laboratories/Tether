@@ -1,0 +1,11 @@
+{
+  "manifest_version": 3,
+  "name": "Tether",
+  "version": "0.0.1",
+  "description": "Stream the browser's console and network logs to a local agent via the Tether daemon.",
+  "minimum_chrome_version": "116",
+  "permissions": ["debugger", "nativeMessaging", "tabs", "storage"],
+  "host_permissions": ["<all_urls>"],
+  "background": { "service_worker": "background.js", "type": "module" },
+  "action": { "default_popup": "popup/popup.html", "default_title": "Tether" }
+}

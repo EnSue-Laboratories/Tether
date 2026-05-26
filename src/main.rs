@@ -250,7 +250,7 @@ impl Default for DaemonState {
                 capture: CaptureConfig {
                     console: true,
                     network: true,
-                    bodies: false,
+                    bodies: true,
                 },
                 limits: LimitConfig {
                     per_session_events: DEFAULT_EVENTS_PER_SESSION,
@@ -853,10 +853,6 @@ fn send_socket_request(
 }
 
 fn export_command(args: ExportArgs) -> Result<ExitCode> {
-    if args.format == ExportFormat::Har {
-        eprintln!("HAR export is planned after the core JSON query path");
-        return Ok(ExitCode::from(1));
-    }
     let response = send_socket_request(
         "export",
         args.session.session.as_deref(),
@@ -868,6 +864,7 @@ fn export_command(args: ExportArgs) -> Result<ExitCode> {
     } else {
         Box::new(io::stdout())
     };
+    let mut events: Vec<Value> = Vec::new();
     for (idx, line) in response.lines().enumerate() {
         if idx == 0 {
             let header: Value = serde_json::from_str(line)?;
@@ -876,9 +873,416 @@ fn export_command(args: ExportArgs) -> Result<ExitCode> {
             }
             continue;
         }
-        writeln!(output, "{line}")?;
+        if args.format == ExportFormat::Har {
+            if let Ok(v) = serde_json::from_str::<Value>(line) {
+                events.push(v);
+            }
+        } else {
+            writeln!(output, "{line}")?;
+        }
+    }
+    if args.format == ExportFormat::Har {
+        let har = build_har(&events);
+        serde_json::to_writer_pretty(&mut output, &har)?;
+        writeln!(output)?;
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/* ---- HAR 1.2 export ----
+ * Groups network events by requestId into HAR entries; emits session navigations as HAR pages.
+ * Reads only the fields the extension actually sends, so missing CDP data → HAR's "-1 / unknown"
+ * sentinels. WebSocket frames go in Chrome-extension `_webSocketMessages`. */
+
+fn build_har(events: &[Value]) -> Value {
+    let pages = build_har_pages(events);
+    let entries = build_har_entries(events);
+    json!({
+        "log": {
+            "version": "1.2",
+            "creator": { "name": "tether", "version": env!("CARGO_PKG_VERSION") },
+            "pages": pages,
+            "entries": entries,
+        }
+    })
+}
+
+fn build_har_pages(events: &[Value]) -> Vec<Value> {
+    let mut pages = Vec::new();
+    for ev in events {
+        if ev.get("type").and_then(Value::as_str) != Some("session") {
+            continue;
+        }
+        let kind = ev.get("event").and_then(Value::as_str).unwrap_or("");
+        if kind != "opened" && kind != "navigated" {
+            continue;
+        }
+        let sid = ev.get("sessionId").and_then(Value::as_str).unwrap_or("");
+        let seq = ev.get("seq").and_then(Value::as_u64).unwrap_or(0);
+        let ts = ev.get("ts").and_then(Value::as_i64).unwrap_or(0);
+        let url = ev.get("url").and_then(Value::as_str).unwrap_or("");
+        pages.push(json!({
+            "startedDateTime": iso8601(ts),
+            "id": format!("page_{sid}_{seq}"),
+            "title": ev.get("title").and_then(Value::as_str).unwrap_or(url),
+            "pageTimings": { "onContentLoad": -1, "onLoad": -1 },
+        }));
+    }
+    pages
+}
+
+fn build_har_entries(events: &[Value]) -> Vec<Value> {
+    /* Group network events by requestId, preserving arrival order. */
+    let mut order: Vec<String> = Vec::new();
+    let mut groups: HashMap<String, Vec<&Value>> = HashMap::new();
+    for ev in events {
+        if ev.get("type").and_then(Value::as_str) != Some("network") {
+            continue;
+        }
+        let Some(rid) = ev.get("requestId").and_then(Value::as_str) else { continue };
+        if !groups.contains_key(rid) {
+            order.push(rid.to_string());
+        }
+        groups.entry(rid.to_string()).or_default().push(ev);
+    }
+
+    /* Pre-compute page boundaries: each network event gets the most recent opened/navigated
+     * page in its session (by seq). */
+    let mut session_pages: HashMap<String, Vec<(u64, String)>> = HashMap::new();
+    for ev in events {
+        if ev.get("type").and_then(Value::as_str) != Some("session") {
+            continue;
+        }
+        let kind = ev.get("event").and_then(Value::as_str).unwrap_or("");
+        if kind != "opened" && kind != "navigated" {
+            continue;
+        }
+        let sid = ev.get("sessionId").and_then(Value::as_str).unwrap_or("").to_string();
+        let seq = ev.get("seq").and_then(Value::as_u64).unwrap_or(0);
+        let pid = format!("page_{sid}_{seq}");
+        session_pages.entry(sid).or_default().push((seq, pid));
+    }
+    for v in session_pages.values_mut() {
+        v.sort_by_key(|p| p.0);
+    }
+
+    let pageref_for = |sid: &str, seq: u64| -> Option<String> {
+        let pages = session_pages.get(sid)?;
+        let mut current = None;
+        for (page_seq, pid) in pages {
+            if *page_seq <= seq {
+                current = Some(pid.clone());
+            } else {
+                break;
+            }
+        }
+        current
+    };
+
+    let mut entries = Vec::new();
+    for rid in order {
+        let phases = groups.get(&rid).cloned().unwrap_or_default();
+        let entry = build_har_entry(&phases, &pageref_for);
+        if let Some(entry) = entry {
+            entries.push(entry);
+        }
+    }
+    entries
+}
+
+fn build_har_entry(
+    phases: &[&Value],
+    pageref_for: &dyn Fn(&str, u64) -> Option<String>,
+) -> Option<Value> {
+    let request_phase = phases.iter().find(|e| phase_of(e) == "request")?;
+    let response_phase = phases.iter().find(|e| phase_of(e) == "response");
+    let finished_phase = phases.iter().find(|e| phase_of(e) == "finished");
+    let failed_phase = phases.iter().find(|e| phase_of(e) == "failed");
+    let body_phase = phases.iter().find(|e| phase_of(e) == "body");
+
+    let started_ts = request_phase.get("ts").and_then(Value::as_i64).unwrap_or(0);
+    let url = request_phase.get("url").and_then(Value::as_str).unwrap_or("").to_string();
+    let method = request_phase.get("method").and_then(Value::as_str).unwrap_or("GET").to_string();
+    let http_version = response_phase
+        .and_then(|r| r.get("httpVersion").and_then(Value::as_str))
+        .unwrap_or("HTTP/1.1")
+        .to_string();
+
+    let request_headers = headers_to_har(request_phase.get("requestHeaders"));
+    let response_headers = response_phase
+        .map(|r| headers_to_har(r.get("responseHeaders")))
+        .unwrap_or_default();
+
+    let query_string = parse_query_string(&url);
+    let request_cookies = cookies_from_headers(&request_headers, "cookie");
+    let response_cookies = cookies_from_headers(&response_headers, "set-cookie");
+
+    let post_data = request_phase.get("postData").and_then(Value::as_str).map(|text| {
+        let mime = header_lookup(&request_headers, "content-type").unwrap_or_else(|| "text/plain".into());
+        json!({ "mimeType": mime, "text": text })
+    });
+
+    let status = response_phase.and_then(|r| r.get("status").and_then(Value::as_i64)).unwrap_or(0);
+    let status_text = response_phase
+        .and_then(|r| r.get("statusText").and_then(Value::as_str))
+        .unwrap_or("")
+        .to_string();
+    let mime_type = response_phase
+        .and_then(|r| r.get("mimeType").and_then(Value::as_str))
+        .unwrap_or("")
+        .to_string();
+    let content_size = finished_phase
+        .and_then(|f| f.get("decodedBodyLength").or_else(|| f.get("encodedDataLength")).and_then(Value::as_i64))
+        .unwrap_or(-1);
+    let transfer_size = finished_phase
+        .and_then(|f| f.get("encodedDataLength").and_then(Value::as_i64))
+        .unwrap_or(-1);
+    let body_text = body_phase.and_then(|b| b.get("body").and_then(Value::as_str));
+    let body_base64 = body_phase.and_then(|b| b.get("bodyBase64").and_then(Value::as_bool)).unwrap_or(false);
+    let mut content = json!({
+        "size": content_size,
+        "mimeType": mime_type,
+    });
+    if let Some(text) = body_text {
+        content["text"] = Value::String(text.to_string());
+        if body_base64 {
+            content["encoding"] = Value::String("base64".into());
+        }
+    }
+    let redirect_url = header_lookup(&response_headers, "location").unwrap_or_default();
+    let response_headers_text = response_phase
+        .and_then(|r| r.get("responseHeadersText").and_then(Value::as_str))
+        .map(|s| s.to_string());
+    let response_headers_size = response_headers_text.as_ref().map(|s| s.len() as i64).unwrap_or(-1);
+
+    let timings = build_timings(response_phase, request_phase, finished_phase.or(failed_phase));
+    let total_time = finished_phase.or(failed_phase).or(response_phase)
+        .and_then(|e| e.get("durationMs").and_then(Value::as_i64))
+        .unwrap_or(-1);
+
+    let server_ip = response_phase
+        .and_then(|r| r.get("serverIPAddress").or_else(|| r.get("remoteIPAddress")).and_then(Value::as_str))
+        .unwrap_or("")
+        .to_string();
+    let connection = response_phase
+        .and_then(|r| r.get("connectionId").and_then(Value::as_u64))
+        .map(|c| c.to_string())
+        .unwrap_or_default();
+    let resource_type = request_phase
+        .get("resourceType")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let initiator = request_phase.get("initiator").cloned();
+    let priority = request_phase.get("priority").and_then(Value::as_str).map(String::from);
+
+    let sid = request_phase.get("sessionId").and_then(Value::as_str).unwrap_or("");
+    let seq = request_phase.get("seq").and_then(Value::as_u64).unwrap_or(0);
+    let pageref = pageref_for(sid, seq);
+
+    let ws_messages = collect_ws_messages(phases);
+
+    let request_body_size = post_data.as_ref()
+        .and_then(|p| p.get("text").and_then(Value::as_str))
+        .map(|t| t.len() as i64)
+        .unwrap_or(if method == "GET" { 0 } else { -1 });
+
+    let mut request_obj = json!({
+        "method": method,
+        "url": url,
+        "httpVersion": http_version,
+        "headers": request_headers,
+        "queryString": query_string,
+        "cookies": request_cookies,
+        "headersSize": -1,
+        "bodySize": request_body_size,
+    });
+    if let Some(p) = post_data {
+        request_obj["postData"] = p;
+    }
+
+    let mut response_obj = json!({
+        "status": status,
+        "statusText": status_text,
+        "httpVersion": http_version,
+        "headers": response_headers,
+        "cookies": response_cookies,
+        "content": content,
+        "redirectURL": redirect_url,
+        "headersSize": response_headers_size,
+        "bodySize": transfer_size,
+    });
+    response_obj["_transferSize"] = Value::from(transfer_size);
+    if let Some(err) = failed_phase.and_then(|f| f.get("errorText").and_then(Value::as_str)) {
+        response_obj["_error"] = Value::String(err.to_string());
+    }
+
+    let mut entry = json!({
+        "startedDateTime": iso8601(started_ts),
+        "time": total_time,
+        "request": request_obj,
+        "response": response_obj,
+        "cache": {},
+        "timings": timings,
+        "serverIPAddress": server_ip,
+        "connection": connection,
+        "_resourceType": resource_type,
+    });
+    if let Some(p) = pageref {
+        entry["pageref"] = Value::String(p);
+    }
+    if let Some(i) = initiator {
+        entry["_initiator"] = i;
+    }
+    if let Some(p) = priority {
+        entry["_priority"] = Value::String(p);
+    }
+    if !ws_messages.is_empty() {
+        entry["_webSocketMessages"] = Value::Array(ws_messages);
+    }
+    Some(entry)
+}
+
+fn phase_of(ev: &Value) -> &str {
+    ev.get("phase").and_then(Value::as_str).unwrap_or("")
+}
+
+fn headers_to_har(value: Option<&Value>) -> Vec<Value> {
+    let Some(map) = value.and_then(Value::as_object) else { return Vec::new() };
+    let mut out: Vec<Value> = map
+        .iter()
+        .map(|(k, v)| json!({ "name": k, "value": v.as_str().unwrap_or("").to_string() }))
+        .collect();
+    out.sort_by(|a, b| {
+        a.get("name").and_then(Value::as_str).unwrap_or("")
+            .cmp(b.get("name").and_then(Value::as_str).unwrap_or(""))
+    });
+    out
+}
+
+fn header_lookup(headers: &[Value], name: &str) -> Option<String> {
+    headers.iter().find_map(|h| {
+        let n = h.get("name").and_then(Value::as_str)?;
+        if n.eq_ignore_ascii_case(name) {
+            Some(h.get("value").and_then(Value::as_str)?.to_string())
+        } else {
+            None
+        }
+    })
+}
+
+fn cookies_from_headers(headers: &[Value], name: &str) -> Vec<Value> {
+    let mut out = Vec::new();
+    for h in headers {
+        let n = match h.get("name").and_then(Value::as_str) { Some(s) => s, None => continue };
+        if !n.eq_ignore_ascii_case(name) { continue }
+        let v = h.get("value").and_then(Value::as_str).unwrap_or("");
+        if v == "«redacted»" { continue }
+        for pair in v.split(';') {
+            let pair = pair.trim();
+            if pair.is_empty() { continue }
+            let (k, val) = pair.split_once('=').unwrap_or((pair, ""));
+            out.push(json!({ "name": k.trim(), "value": val.trim() }));
+        }
+    }
+    out
+}
+
+fn parse_query_string(url: &str) -> Vec<Value> {
+    let Some(qs_start) = url.find('?') else { return Vec::new() };
+    let qs = &url[qs_start + 1..];
+    let qs = qs.split('#').next().unwrap_or(qs);
+    qs.split('&')
+        .filter(|s| !s.is_empty())
+        .map(|pair| {
+            let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+            json!({ "name": k, "value": v })
+        })
+        .collect()
+}
+
+fn build_timings(response: Option<&&Value>, request: &Value, end: Option<&&Value>) -> Value {
+    let total = end
+        .and_then(|e| e.get("durationMs").and_then(Value::as_i64))
+        .unwrap_or(-1);
+    /* If we have a CDP `timing` block on the response, fan it out into HAR's phase breakdown.
+     * CDP timings are millisecond offsets from `timing.requestTime` (which is monotonic seconds). */
+    if let Some(t) = response.and_then(|r| r.get("timing").and_then(Value::as_object)) {
+        let g = |k: &str| t.get(k).and_then(Value::as_f64).unwrap_or(-1.0);
+        let nonneg = |a: f64, b: f64| if a < 0.0 || b < 0.0 { -1.0 } else { (b - a).max(0.0) };
+        let dns = nonneg(g("dnsStart"), g("dnsEnd"));
+        let connect = nonneg(g("connectStart"), g("connectEnd"));
+        let ssl = nonneg(g("sslStart"), g("sslEnd"));
+        let send = nonneg(g("sendStart"), g("sendEnd"));
+        let wait = nonneg(g("sendEnd"), g("receiveHeadersEnd"));
+        let mut blocked = -1.0;
+        if g("connectStart") >= 0.0 {
+            blocked = g("connectStart").max(0.0);
+        }
+        return json!({
+            "blocked": round_or_neg1(blocked),
+            "dns": round_or_neg1(dns),
+            "connect": round_or_neg1(connect),
+            "ssl": round_or_neg1(ssl),
+            "send": round_or_neg1(send),
+            "wait": round_or_neg1(wait),
+            "receive": round_or_neg1((total as f64 - g("receiveHeadersEnd")).max(0.0)),
+        });
+    }
+    /* No detailed timing — give HAR the `wait` we have and -1 for the rest. */
+    let _ = request;
+    json!({
+        "blocked": -1, "dns": -1, "connect": -1, "ssl": -1, "send": -1,
+        "wait": total, "receive": -1,
+    })
+}
+
+fn round_or_neg1(v: f64) -> i64 {
+    if v < 0.0 { -1 } else { v.round() as i64 }
+}
+
+fn collect_ws_messages(phases: &[&Value]) -> Vec<Value> {
+    let mut out = Vec::new();
+    for ev in phases {
+        let kind = match phase_of(ev) {
+            "ws-frame-sent" => "send",
+            "ws-frame-recv" => "receive",
+            _ => continue,
+        };
+        let ts = ev.get("ts").and_then(Value::as_i64).unwrap_or(0);
+        let opcode = ev.get("opcode").and_then(Value::as_i64).unwrap_or(0);
+        let data = ev.get("payloadData").and_then(Value::as_str).unwrap_or("");
+        out.push(json!({
+            "type": kind,
+            "time": ts as f64 / 1000.0,
+            "opcode": opcode,
+            "data": data,
+        }));
+    }
+    out
+}
+
+/* Hand-rolled epoch-ms → ISO 8601 UTC; avoids pulling in chrono/time just for HAR. */
+fn iso8601(epoch_ms: i64) -> String {
+    let secs = epoch_ms.div_euclid(1000);
+    let ms = epoch_ms.rem_euclid(1000) as u32;
+    let days = secs.div_euclid(86400);
+    let sod = secs.rem_euclid(86400) as u32;
+    let h = sod / 3600;
+    let m = (sod % 3600) / 60;
+    let s = sod % 60;
+    // Howard Hinnant's civil_from_days.
+    let z = days + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = (z - era * 146097) as u64;
+    let yoe = (doe.wrapping_sub(doe / 1460).wrapping_add(doe / 36524).wrapping_sub(doe / 146096)) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let mo = if mp < 10 { mp + 3 } else { mp - 9 };
+    let yyyy = if mo <= 2 { y + 1 } else { y };
+    format!("{yyyy:04}-{mo:02}-{d:02}T{h:02}:{m:02}:{s:02}.{ms:03}Z")
 }
 
 fn error_exit(value: &Value) -> ExitCode {
@@ -1398,6 +1802,108 @@ mod tests {
         assert_eq!(parse_duration("5m"), Some(Duration::from_secs(300)));
         assert_eq!(parse_duration("1h"), Some(Duration::from_secs(3600)));
         assert_eq!(parse_duration("bogus"), None);
+    }
+
+    #[test]
+    fn iso8601_handles_known_epochs() {
+        assert_eq!(iso8601(0), "1970-01-01T00:00:00.000Z");
+        // Both values cross-checked against datetime.fromtimestamp(.., tz=utc).isoformat().
+        assert_eq!(iso8601(1_716_690_000_123), "2024-05-26T02:20:00.123Z");
+        assert_eq!(iso8601(1_779_765_527_754), "2026-05-26T03:18:47.754Z");
+    }
+
+    #[test]
+    fn build_har_groups_request_phases_into_entries_with_body_and_timing() {
+        let events = vec![
+            json!({
+                "type": "session", "ts": 1_779_763_000_000i64, "tabId": 1, "sessionId": "s1",
+                "seq": 1, "event": "opened", "url": "https://ex.com/", "title": "Example"
+            }),
+            json!({
+                "type": "network", "ts": 1_779_763_001_000i64, "tabId": 1, "sessionId": "s1",
+                "seq": 2, "requestId": "r1", "phase": "request",
+                "method": "POST", "url": "https://ex.com/api?x=1",
+                "requestHeaders": {"content-type": "application/json", "Cookie": "a=1; b=2"},
+                "postData": "{\"k\":1}",
+                "initiator": {"type": "script"}, "priority": "High",
+                "resourceType": "fetch"
+            }),
+            json!({
+                "type": "network", "ts": 1_779_763_001_010i64, "tabId": 1, "sessionId": "s1",
+                "seq": 3, "requestId": "r1", "phase": "response",
+                "url": "https://ex.com/api?x=1", "status": 200, "statusText": "OK",
+                "mimeType": "application/json", "httpVersion": "h2",
+                "responseHeaders": {"content-type": "application/json"},
+                "serverIPAddress": "1.2.3.4", "connectionId": 7,
+                "durationMs": 42,
+                "timing": {
+                    "requestTime": 1.0,
+                    "dnsStart": 0.0, "dnsEnd": 5.0,
+                    "connectStart": 5.0, "connectEnd": 12.0,
+                    "sslStart": 7.0, "sslEnd": 11.0,
+                    "sendStart": 12.0, "sendEnd": 13.0,
+                    "receiveHeadersEnd": 40.0
+                }
+            }),
+            json!({
+                "type": "network", "ts": 1_779_763_001_040i64, "tabId": 1, "sessionId": "s1",
+                "seq": 4, "requestId": "r1", "phase": "finished",
+                "url": "https://ex.com/api?x=1", "durationMs": 42,
+                "encodedDataLength": 100
+            }),
+            json!({
+                "type": "network", "ts": 1_779_763_001_050i64, "tabId": 1, "sessionId": "s1",
+                "seq": 5, "requestId": "r1", "phase": "body",
+                "url": "https://ex.com/api?x=1", "body": "{\"ok\":true}", "bodyBase64": false
+            }),
+        ];
+        let har = build_har(&events);
+        let entry = &har["log"]["entries"][0];
+        assert_eq!(entry["request"]["method"], "POST");
+        assert_eq!(entry["request"]["postData"]["text"], "{\"k\":1}");
+        assert_eq!(entry["request"]["queryString"][0]["name"], "x");
+        let cookies = entry["request"]["cookies"].as_array().unwrap();
+        assert!(cookies.iter().any(|c| c["name"] == "a" && c["value"] == "1"));
+        assert!(cookies.iter().any(|c| c["name"] == "b" && c["value"] == "2"));
+        assert_eq!(entry["response"]["status"], 200);
+        assert_eq!(entry["response"]["content"]["text"], "{\"ok\":true}");
+        assert_eq!(entry["response"]["bodySize"], 100);
+        assert_eq!(entry["timings"]["dns"], 5);
+        assert_eq!(entry["timings"]["connect"], 7);
+        assert_eq!(entry["serverIPAddress"], "1.2.3.4");
+        assert_eq!(entry["_initiator"]["type"], "script");
+        assert_eq!(entry["_priority"], "High");
+        assert_eq!(entry["pageref"], "page_s1_1");
+        assert_eq!(har["log"]["pages"][0]["title"], "Example");
+    }
+
+    #[test]
+    fn build_har_includes_websocket_messages() {
+        let events = vec![
+            json!({
+                "type": "network", "ts": 1_779_763_002_000i64, "tabId": 1, "sessionId": "s1",
+                "seq": 1, "requestId": "ws1", "phase": "request",
+                "method": "GET", "url": "wss://ex.com/sock",
+                "resourceType": "websocket"
+            }),
+            json!({
+                "type": "network", "ts": 1_779_763_002_100i64, "tabId": 1, "sessionId": "s1",
+                "seq": 2, "requestId": "ws1", "phase": "ws-frame-sent",
+                "url": "wss://ex.com/sock", "opcode": 1, "payloadData": "ping"
+            }),
+            json!({
+                "type": "network", "ts": 1_779_763_002_200i64, "tabId": 1, "sessionId": "s1",
+                "seq": 3, "requestId": "ws1", "phase": "ws-frame-recv",
+                "url": "wss://ex.com/sock", "opcode": 1, "payloadData": "pong"
+            }),
+        ];
+        let har = build_har(&events);
+        let msgs = har["log"]["entries"][0]["_webSocketMessages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0]["type"], "send");
+        assert_eq!(msgs[0]["data"], "ping");
+        assert_eq!(msgs[1]["type"], "receive");
+        assert_eq!(msgs[1]["data"], "pong");
     }
 
     #[test]

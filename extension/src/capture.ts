@@ -22,10 +22,15 @@ export interface ConsoleEvent extends Envelope {
   url?: string;
   source: "console-api" | "exception" | "network-error" | "browser-log";
 }
+export type NetworkPhase =
+  | "request" | "response" | "failed" | "finished" | "body"
+  | "ws-open" | "ws-handshake" | "ws-frame-sent" | "ws-frame-recv"
+  | "ws-frame-error" | "ws-close";
+
 export interface NetworkEvent extends Envelope {
   type: "network";
   requestId: string;
-  phase: "request" | "response" | "failed";
+  phase: NetworkPhase;
   method?: string;
   url: string;
   resourceType?: string;
@@ -37,6 +42,36 @@ export interface NetworkEvent extends Envelope {
   durationMs?: number;
   fromCache?: boolean;
   errorText?: string;
+  /* Request-phase extras */
+  postData?: string;
+  postDataBase64?: boolean;
+  postDataTruncated?: boolean;
+  initiator?: Record<string, unknown>;
+  priority?: string;
+  /* Response-phase extras (CDP Network.responseReceived.response) */
+  httpVersion?: string;        // e.g. "http/1.1" — the protocol field from CDP
+  serverIPAddress?: string;
+  serverPort?: number;
+  connectionId?: number;
+  connectionReused?: boolean;
+  remoteIPAddress?: string;
+  remotePort?: number;
+  responseHeadersText?: string;
+  encodedResponseHeadersSize?: number;
+  timing?: Record<string, number>;
+  /* Finished-phase (CDP Network.loadingFinished) extras */
+  encodedDataLength?: number;
+  decodedBodyLength?: number;
+  /* Body-phase payload (size-capped) */
+  body?: string;
+  bodyBase64?: boolean;
+  bodyTruncated?: boolean;
+  /* WebSocket-phase extras */
+  opcode?: number;
+  mask?: boolean;
+  payloadData?: string;
+  payloadBase64?: boolean;
+  payloadTruncated?: boolean;
 }
 export interface SessionEvent extends Envelope {
   type: "session";
@@ -54,7 +89,7 @@ export interface CaptureConfig {
   filter: { urlAllow: string[]; urlDeny: string[] };
 }
 export const DEFAULT_CONFIG: CaptureConfig = {
-  capture: { console: true, network: true, bodies: false },
+  capture: { console: true, network: true, bodies: true },
   limits: { perSessionEvents: 5000, bodyMaxBytes: 65536 },
   redact: { headers: ["authorization", "cookie", "set-cookie", "proxy-authorization"] },
   filter: { urlAllow: [], urlDeny: [] }
@@ -191,39 +226,134 @@ export function mapLogEntryAdded(p: CdpLogEntryAdded, ctx: CaptureContext, pageU
 }
 
 /* ---- network ---- */
+interface CdpRequest {
+  url: string;
+  method: string;
+  headers: Record<string, string>;
+  postData?: string;
+  hasPostData?: boolean;
+}
+interface CdpInitiator { type: string; stack?: CdpStackTrace; url?: string; lineNumber?: number; }
 interface CdpRequestWillBeSent {
   requestId: string;
-  request: { url: string; method: string; headers: Record<string, string> };
-  timestamp: number; wallTime?: number; type?: string;
+  request: CdpRequest;
+  timestamp: number; wallTime?: number;
+  type?: string;
+  initiator?: CdpInitiator;
+  redirectResponse?: CdpResponse;
+}
+interface CdpResourceTiming {
+  requestTime: number;
+  proxyStart: number; proxyEnd: number;
+  dnsStart: number; dnsEnd: number;
+  connectStart: number; connectEnd: number;
+  sslStart: number; sslEnd: number;
+  sendStart: number; sendEnd: number;
+  receiveHeadersStart?: number; receiveHeadersEnd: number;
+  pushStart?: number; pushEnd?: number;
+  workerStart?: number; workerReady?: number;
+  workerFetchStart?: number; workerRespondWithSettled?: number;
+}
+interface CdpResponse {
+  url: string;
+  status: number; statusText: string;
+  headers: Record<string, string>;
+  headersText?: string;
+  mimeType: string;
+  charset?: string;
+  requestHeaders?: Record<string, string>;
+  requestHeadersText?: string;
+  connectionReused?: boolean;
+  connectionId?: number;
+  remoteIPAddress?: string;
+  remotePort?: number;
+  fromDiskCache?: boolean;
+  fromServiceWorker?: boolean;
+  fromPrefetchCache?: boolean;
+  encodedDataLength?: number;
+  timing?: CdpResourceTiming;
+  protocol?: string;
 }
 interface CdpResponseReceived {
   requestId: string;
-  response: { url: string; status: number; statusText: string; headers: Record<string, string>; mimeType: string; fromDiskCache?: boolean };
-  timestamp: number; type?: string;
+  response: CdpResponse;
+  timestamp: number;
+  type?: string;
+  hasExtraInfo?: boolean;
 }
-interface CdpLoadingFailed { requestId: string; errorText: string; timestamp: number; type?: string; }
+interface CdpLoadingFailed {
+  requestId: string;
+  errorText: string;
+  timestamp: number;
+  type?: string;
+  canceled?: boolean;
+  blockedReason?: string;
+  corsErrorStatus?: { corsError: string; failedParameter?: string };
+}
+interface CdpLoadingFinished {
+  requestId: string;
+  timestamp: number;
+  encodedDataLength: number;
+}
+
+/** Trim a UTF-8 string to a byte cap; for binary base64 payloads, trim base64 length to cap proxy. */
+function capString(s: string, base64: boolean, cap: number): { value: string; truncated: boolean } {
+  if (base64) {
+    if (s.length <= cap) return { value: s, truncated: false };
+    return { value: s.slice(0, cap), truncated: true };
+  }
+  // approximate byte size — TextEncoder is available in service workers
+  const enc = typeof TextEncoder !== "undefined" ? new TextEncoder() : null;
+  if (enc) {
+    const bytes = enc.encode(s);
+    if (bytes.length <= cap) return { value: s, truncated: false };
+    // safe slice on code units, then trim trailing partial utf-8 by re-decoding
+    return { value: new TextDecoder("utf-8", { fatal: false }).decode(bytes.slice(0, cap)), truncated: true };
+  }
+  if (s.length <= cap) return { value: s, truncated: false };
+  return { value: s.slice(0, cap), truncated: true };
+}
 
 export function mapRequestWillBeSent(p: CdpRequestWillBeSent, ctx: CaptureContext): NetworkEvent | null {
   if (!ctx.config.capture.network || !urlAllowed(p.request.url, ctx.config.filter)) return null;
   ctx.reqInfo.set(p.requestId, { start: p.timestamp, url: p.request.url });
   const ts = p.wallTime ? Math.round(p.wallTime * 1000) : Date.now();
-  return {
+  const ev: NetworkEvent = {
     ...envelope(ctx, "network", ts), type: "network", requestId: p.requestId, phase: "request",
     method: p.request.method, url: p.request.url, resourceType: p.type?.toLowerCase(),
-    requestHeaders: redactHeaders(p.request.headers, ctx.config.redact.headers)
+    requestHeaders: redactHeaders(p.request.headers, ctx.config.redact.headers),
+    initiator: p.initiator as unknown as Record<string, unknown> | undefined
   };
+  if (ctx.config.capture.bodies && p.request.postData) {
+    const { value, truncated } = capString(p.request.postData, false, ctx.config.limits.bodyMaxBytes);
+    ev.postData = value;
+    ev.postDataBase64 = false;
+    if (truncated) ev.postDataTruncated = true;
+  }
+  return ev;
 }
 
 export function mapResponseReceived(p: CdpResponseReceived, ctx: CaptureContext): NetworkEvent | null {
   if (!ctx.config.capture.network || !urlAllowed(p.response.url, ctx.config.filter)) return null;
   const info = ctx.reqInfo.get(p.requestId);
   const durationMs = info ? Math.round((p.timestamp - info.start) * 1000) : undefined;
+  const r = p.response;
   return {
     ...envelope(ctx, "network"), type: "network", requestId: p.requestId, phase: "response",
-    url: p.response.url, resourceType: p.type?.toLowerCase(), status: p.response.status,
-    statusText: p.response.statusText, mimeType: p.response.mimeType,
-    responseHeaders: redactHeaders(p.response.headers, ctx.config.redact.headers),
-    durationMs, fromCache: p.response.fromDiskCache
+    url: r.url, resourceType: p.type?.toLowerCase(), status: r.status,
+    statusText: r.statusText, mimeType: r.mimeType,
+    responseHeaders: redactHeaders(r.headers, ctx.config.redact.headers),
+    durationMs, fromCache: r.fromDiskCache,
+    httpVersion: r.protocol,
+    serverIPAddress: r.remoteIPAddress,
+    serverPort: r.remotePort,
+    remoteIPAddress: r.remoteIPAddress,
+    remotePort: r.remotePort,
+    connectionId: r.connectionId,
+    connectionReused: r.connectionReused,
+    responseHeadersText: r.headersText,
+    encodedResponseHeadersSize: r.headersText ? r.headersText.length : undefined,
+    timing: r.timing as unknown as Record<string, number> | undefined
   };
 }
 
@@ -235,5 +365,135 @@ export function mapLoadingFailed(p: CdpLoadingFailed, ctx: CaptureContext): Netw
   return {
     ...envelope(ctx, "network"), type: "network", requestId: p.requestId, phase: "failed",
     url: info?.url ?? "", errorText: p.errorText, resourceType: p.type?.toLowerCase(), durationMs
+  };
+}
+
+export function mapLoadingFinished(p: CdpLoadingFinished, ctx: CaptureContext): NetworkEvent | null {
+  if (!ctx.config.capture.network) return null;
+  const info = ctx.reqInfo.get(p.requestId);
+  ctx.reqInfo.delete(p.requestId);
+  const durationMs = info ? Math.round((p.timestamp - info.start) * 1000) : undefined;
+  return {
+    ...envelope(ctx, "network"), type: "network", requestId: p.requestId, phase: "finished",
+    url: info?.url ?? "", durationMs, encodedDataLength: p.encodedDataLength
+  };
+}
+
+/* Emit body event after fetching from CDP. background.ts owns the async fetch. */
+export function buildBodyEvent(
+  ctx: CaptureContext,
+  requestId: string,
+  url: string,
+  body: string,
+  base64Encoded: boolean
+): NetworkEvent {
+  const { value, truncated } = capString(body, base64Encoded, ctx.config.limits.bodyMaxBytes);
+  return {
+    ...envelope(ctx, "network"), type: "network", requestId, phase: "body",
+    url, body: value, bodyBase64: base64Encoded, bodyTruncated: truncated || undefined
+  };
+}
+
+/* ---- WebSocket ---- */
+interface CdpWebSocketCreated { requestId: string; url: string; initiator?: CdpInitiator; }
+interface CdpWebSocketHandshakeRequest {
+  requestId: string; timestamp: number; wallTime?: number;
+  request: { headers: Record<string, string> };
+}
+interface CdpWebSocketHandshakeResponse {
+  requestId: string; timestamp: number;
+  response: {
+    status: number; statusText: string;
+    headers: Record<string, string>;
+    headersText?: string;
+    requestHeaders?: Record<string, string>;
+    requestHeadersText?: string;
+  };
+}
+interface CdpWebSocketFrame {
+  requestId: string; timestamp: number;
+  response: { opcode: number; mask: boolean; payloadData: string };
+}
+interface CdpWebSocketFrameError { requestId: string; timestamp: number; errorMessage: string; }
+interface CdpWebSocketClosed { requestId: string; timestamp: number; }
+
+export function mapWsCreated(p: CdpWebSocketCreated, ctx: CaptureContext): NetworkEvent | null {
+  if (!ctx.config.capture.network || !urlAllowed(p.url, ctx.config.filter)) return null;
+  ctx.reqInfo.set(p.requestId, { start: Date.now() / 1000, url: p.url });
+  return {
+    ...envelope(ctx, "network"), type: "network", requestId: p.requestId, phase: "ws-open",
+    url: p.url, resourceType: "websocket",
+    initiator: p.initiator as unknown as Record<string, unknown> | undefined
+  };
+}
+
+export function mapWsHandshakeRequest(p: CdpWebSocketHandshakeRequest, ctx: CaptureContext): NetworkEvent | null {
+  if (!ctx.config.capture.network) return null;
+  const info = ctx.reqInfo.get(p.requestId);
+  if (info && !urlAllowed(info.url, ctx.config.filter)) return null;
+  const ts = p.wallTime ? Math.round(p.wallTime * 1000) : Date.now();
+  return {
+    ...envelope(ctx, "network", ts), type: "network", requestId: p.requestId, phase: "request",
+    url: info?.url ?? "", resourceType: "websocket", method: "GET",
+    requestHeaders: redactHeaders(p.request.headers, ctx.config.redact.headers)
+  };
+}
+
+export function mapWsHandshakeResponse(p: CdpWebSocketHandshakeResponse, ctx: CaptureContext): NetworkEvent | null {
+  if (!ctx.config.capture.network) return null;
+  const info = ctx.reqInfo.get(p.requestId);
+  if (info && !urlAllowed(info.url, ctx.config.filter)) return null;
+  const durationMs = info ? Math.round((p.timestamp - info.start) * 1000) : undefined;
+  return {
+    ...envelope(ctx, "network"), type: "network", requestId: p.requestId, phase: "ws-handshake",
+    url: info?.url ?? "", resourceType: "websocket",
+    status: p.response.status, statusText: p.response.statusText,
+    responseHeaders: redactHeaders(p.response.headers, ctx.config.redact.headers),
+    responseHeadersText: p.response.headersText,
+    durationMs
+  };
+}
+
+function mapWsFrame(
+  p: CdpWebSocketFrame, ctx: CaptureContext,
+  phase: "ws-frame-sent" | "ws-frame-recv"
+): NetworkEvent | null {
+  if (!ctx.config.capture.network) return null;
+  const info = ctx.reqInfo.get(p.requestId);
+  if (info && !urlAllowed(info.url, ctx.config.filter)) return null;
+  // CDP gives payloadData as a UTF-8 string for opcode 1 (text) and base64 for opcode 2 (binary).
+  const isBinary = p.response.opcode === 2;
+  const { value, truncated } = capString(p.response.payloadData, isBinary, ctx.config.limits.bodyMaxBytes);
+  return {
+    ...envelope(ctx, "network"), type: "network", requestId: p.requestId, phase,
+    url: info?.url ?? "", resourceType: "websocket",
+    opcode: p.response.opcode, mask: p.response.mask,
+    payloadData: value, payloadBase64: isBinary || undefined,
+    payloadTruncated: truncated || undefined
+  };
+}
+export function mapWsFrameSent(p: CdpWebSocketFrame, ctx: CaptureContext): NetworkEvent | null {
+  return mapWsFrame(p, ctx, "ws-frame-sent");
+}
+export function mapWsFrameReceived(p: CdpWebSocketFrame, ctx: CaptureContext): NetworkEvent | null {
+  return mapWsFrame(p, ctx, "ws-frame-recv");
+}
+export function mapWsFrameError(p: CdpWebSocketFrameError, ctx: CaptureContext): NetworkEvent | null {
+  if (!ctx.config.capture.network) return null;
+  const info = ctx.reqInfo.get(p.requestId);
+  if (info && !urlAllowed(info.url, ctx.config.filter)) return null;
+  return {
+    ...envelope(ctx, "network"), type: "network", requestId: p.requestId, phase: "ws-frame-error",
+    url: info?.url ?? "", resourceType: "websocket", errorText: p.errorMessage
+  };
+}
+export function mapWsClosed(p: CdpWebSocketClosed, ctx: CaptureContext): NetworkEvent | null {
+  if (!ctx.config.capture.network) return null;
+  const info = ctx.reqInfo.get(p.requestId);
+  if (info && !urlAllowed(info.url, ctx.config.filter)) return null;
+  ctx.reqInfo.delete(p.requestId);
+  return {
+    ...envelope(ctx, "network"), type: "network", requestId: p.requestId, phase: "ws-close",
+    url: info?.url ?? "", resourceType: "websocket"
   };
 }

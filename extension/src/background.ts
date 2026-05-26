@@ -10,9 +10,11 @@
  * (Persisting sessions across worker restarts is a possible follow-up.) */
 
 import {
-  CaptureConfig, CaptureContext, ControlMessage, DEFAULT_CONFIG, IngestEvent, IngestMessage,
-  mapConsoleApiCalled, mapExceptionThrown, mapLoadingFailed, mapLogEntryAdded,
-  mapRequestWillBeSent, mapResponseReceived
+  buildBodyEvent, CaptureConfig, CaptureContext, ControlMessage, DEFAULT_CONFIG, IngestEvent,
+  IngestMessage, mapConsoleApiCalled, mapExceptionThrown, mapLoadingFailed, mapLoadingFinished,
+  mapLogEntryAdded, mapRequestWillBeSent, mapResponseReceived,
+  mapWsClosed, mapWsCreated, mapWsFrameError, mapWsFrameReceived, mapWsFrameSent,
+  mapWsHandshakeRequest, mapWsHandshakeResponse
 } from "./capture.js";
 import { PopupRequest, TabState } from "./messages.js";
 
@@ -88,7 +90,10 @@ function enableCapture(tabId: number): void {
     contexts.set(tabId, ctx);
     counts.set(tabId, { console: 0, network: 0 });
     chrome.debugger.sendCommand({ tabId }, "Runtime.enable");
-    chrome.debugger.sendCommand({ tabId }, "Network.enable");
+    chrome.debugger.sendCommand({ tabId }, "Network.enable", {
+      maxResourceBufferSize: 10 * 1024 * 1024,
+      maxTotalBufferSize: 100 * 1024 * 1024
+    });
     chrome.debugger.sendCommand({ tabId }, "Log.enable");
     connectDaemon();
     chrome.tabs.get(tabId, (tab) => {
@@ -110,6 +115,20 @@ function disableCapture(tabId: number, detach = true): void {
   if (detach) chrome.debugger.detach({ tabId }, () => { void chrome.runtime.lastError; });
 }
 
+/* For Network.getResponseBody we need the request's URL (for the body event) after we delete reqInfo
+ * in mapLoadingFinished; cache url-per-requestId in a small map that lives until loadingFinished. */
+const bodyUrls = new Map<string, string>();
+
+interface CdpResponseBody { body: string; base64Encoded: boolean; }
+function fetchResponseBody(tabId: number, requestId: string): Promise<CdpResponseBody | null> {
+  return new Promise((resolve) => {
+    chrome.debugger.sendCommand({ tabId }, "Network.getResponseBody", { requestId }, (result) => {
+      if (chrome.runtime.lastError || !result) { resolve(null); return; }
+      resolve(result as CdpResponseBody);
+    });
+  });
+}
+
 /* ---- CDP event routing ---- */
 chrome.debugger.onEvent.addListener((source, method, params) => {
   const tabId = source.tabId;
@@ -122,9 +141,45 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
     case "Runtime.consoleAPICalled": emit(mapConsoleApiCalled(p, ctx, pageUrl)); break;
     case "Runtime.exceptionThrown":  emit(mapExceptionThrown(p, ctx, pageUrl)); break;
     case "Log.entryAdded":           emit(mapLogEntryAdded(p, ctx, pageUrl)); break;
-    case "Network.requestWillBeSent": emit(mapRequestWillBeSent(p, ctx)); break;
-    case "Network.responseReceived":  emit(mapResponseReceived(p, ctx)); break;
-    case "Network.loadingFailed":     emit(mapLoadingFailed(p, ctx)); break;
+    case "Network.requestWillBeSent": {
+      const req = p as { requestId: string; request: { url: string } };
+      bodyUrls.set(req.requestId, req.request.url);
+      emit(mapRequestWillBeSent(p, ctx));
+      break;
+    }
+    case "Network.responseReceived": {
+      const req = p as { requestId: string; response: { url: string } };
+      bodyUrls.set(req.requestId, req.response.url);
+      emit(mapResponseReceived(p, ctx));
+      break;
+    }
+    case "Network.loadingFailed": {
+      const req = p as { requestId: string };
+      bodyUrls.delete(req.requestId);
+      emit(mapLoadingFailed(p, ctx));
+      break;
+    }
+    case "Network.loadingFinished": {
+      const req = p as { requestId: string };
+      const url = bodyUrls.get(req.requestId) ?? "";
+      emit(mapLoadingFinished(p, ctx));
+      if (ctx.config.capture.bodies) {
+        void fetchResponseBody(tabId, req.requestId).then((b) => {
+          if (b && b.body) emit(buildBodyEvent(ctx, req.requestId, url, b.body, b.base64Encoded));
+          bodyUrls.delete(req.requestId);
+        });
+      } else {
+        bodyUrls.delete(req.requestId);
+      }
+      break;
+    }
+    case "Network.webSocketCreated":                    emit(mapWsCreated(p, ctx)); break;
+    case "Network.webSocketWillSendHandshakeRequest":   emit(mapWsHandshakeRequest(p, ctx)); break;
+    case "Network.webSocketHandshakeResponseReceived":  emit(mapWsHandshakeResponse(p, ctx)); break;
+    case "Network.webSocketFrameSent":                  emit(mapWsFrameSent(p, ctx)); break;
+    case "Network.webSocketFrameReceived":              emit(mapWsFrameReceived(p, ctx)); break;
+    case "Network.webSocketFrameError":                 emit(mapWsFrameError(p, ctx)); break;
+    case "Network.webSocketClosed":                     emit(mapWsClosed(p, ctx)); break;
     default: break;
   }
 });

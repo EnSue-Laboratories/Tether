@@ -51,8 +51,11 @@ const ui: UiState = {
 function renderCapture(s: TabState): void {
   const btn = el<HTMLButtonElement>("capture-toggle");
   btn.setAttribute("aria-checked", String(s.capturing));
-  // Daemon down → disable the toggle so users can't fire futile requests.
-  btn.disabled = !s.daemonConnected;
+  // Don't disable the toggle on `!daemonConnected`: the background only
+  // connects to the native host AFTER the first capture request, so a fresh
+  // popup always shows daemonConnected=false. Disabling here would deadlock
+  // the user. Failure to connect (e.g. host not installed) is surfaced by
+  // the post-toggle TabState, not by greying out the control upfront.
 }
 
 function renderChannel(): void {
@@ -92,11 +95,10 @@ function renderStatus(s: TabState): void {
 }
 
 function renderEmptyState(s: TabState): void {
+  // We deliberately don't distinguish "daemon never attempted" from "daemon
+  // tried and failed" — TabState doesn't carry an attempt/failure signal yet
+  // (follow-up). For the user, "not capturing" is the actionable state.
   const title = el("empty-title");
-  if (!s.daemonConnected) {
-    title.textContent = "— Daemon disconnected";
-    return;
-  }
   if (!s.capturing) {
     title.textContent = "— No capture in progress";
     return;

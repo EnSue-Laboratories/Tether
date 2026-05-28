@@ -16,12 +16,13 @@ import {
   mapWsClosed, mapWsCreated, mapWsFrameError, mapWsFrameReceived, mapWsFrameSent,
   mapWsHandshakeRequest, mapWsHandshakeResponse
 } from "./capture.js";
-import { PopupRequest, TabState } from "./messages.js";
+import { PopupConsoleRow, PopupNetworkRow, PopupRequest, TabState } from "./messages.js";
 
 const NATIVE_HOST = "com.ensue.tether";
 const CDP_VERSION = "1.3";
 const FLUSH_MS = 500;
 const MAX_QUEUE = 10000; // bound the outbound queue if the daemon is unreachable
+const POPUP_TAIL = 100;  // popup-only recent-event window (per tab, per channel)
 
 let port: chrome.runtime.Port | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -32,6 +33,13 @@ let queue: IngestEvent[] = [];
 const contexts = new Map<number, CaptureContext>();                 // tabId -> capture context
 const counts = new Map<number, { console: number; network: number }>();
 const pageUrls = new Map<number, string>();                         // tabId -> last known url
+
+/* Per-tab recent-event tail for the popup. Network rows are rolled up by
+ * requestId so request → response → finished updates one row in place; the
+ * Map's insertion order is the display order. Console rows are append-only. */
+const netTail = new Map<number, Map<string, PopupNetworkRow>>();
+const conTail = new Map<number, PopupConsoleRow[]>();
+let consoleRowSeq = 0;
 
 /* ---- daemon connection (Native Messaging) ---- */
 function connectDaemon(): void {
@@ -59,9 +67,61 @@ function scheduleReconnect(): void {
 function emit(ev: IngestEvent | null): void {
   if (!ev) return;
   queue.push(ev);
-  if (ev.type === "console") bump(ev.tabId, "console");
-  else if (ev.type === "network" && ev.phase === "request") bump(ev.tabId, "network");
+  if (ev.type === "console") {
+    bump(ev.tabId, "console");
+    pushConsoleTail(ev.tabId, ev);
+  } else if (ev.type === "network") {
+    if (ev.phase === "request") bump(ev.tabId, "network");
+    updateNetworkTail(ev.tabId, ev);
+  }
   if (!flushTimer) flushTimer = setTimeout(flush, FLUSH_MS);
+}
+
+function pushConsoleTail(tabId: number, ev: import("./capture.js").ConsoleEvent): void {
+  const rows = conTail.get(tabId) ?? [];
+  rows.push({
+    id: `c_${++consoleRowSeq}`,
+    ts: ev.ts,
+    level: ev.level,
+    text: ev.text,
+    url: ev.url
+  });
+  // Trim from the front — we keep newest at the end.
+  if (rows.length > POPUP_TAIL) rows.splice(0, rows.length - POPUP_TAIL);
+  conTail.set(tabId, rows);
+}
+
+function updateNetworkTail(tabId: number, ev: import("./capture.js").NetworkEvent): void {
+  const map = netTail.get(tabId) ?? new Map<string, PopupNetworkRow>();
+  // Map preserves insertion order — for an in-place update we keep the
+  // existing position. We don't bother surfacing body / handshake / ws-frame-*
+  // as standalone rows; they fold into the originating requestId.
+  const existing = map.get(ev.requestId);
+  if (existing) {
+    if (ev.method) existing.method = ev.method;
+    if (ev.url) existing.url = ev.url;
+    if (ev.status !== undefined) existing.status = ev.status;
+    if (ev.durationMs !== undefined) existing.durationMs = ev.durationMs;
+    if (ev.resourceType) existing.resourceType = ev.resourceType;
+    if (ev.phase === "failed" && ev.errorText) existing.errorText = ev.errorText;
+  } else {
+    map.set(ev.requestId, {
+      id: ev.requestId,
+      ts: ev.ts,
+      method: ev.method,
+      url: ev.url || "",
+      status: ev.status,
+      durationMs: ev.durationMs,
+      resourceType: ev.resourceType,
+      errorText: ev.phase === "failed" ? ev.errorText : undefined
+    });
+    if (map.size > POPUP_TAIL) {
+      // Drop the oldest row to bound memory. Map iterator yields in insertion order.
+      const first = map.keys().next();
+      if (!first.done) map.delete(first.value);
+    }
+  }
+  netTail.set(tabId, map);
 }
 function bump(tabId: number, kind: "console" | "network"): void {
   const c = counts.get(tabId) ?? { console: 0, network: 0 };
@@ -112,6 +172,8 @@ function disableCapture(tabId: number, detach = true): void {
   flush();
   contexts.delete(tabId);
   counts.delete(tabId);
+  netTail.delete(tabId);
+  conTail.delete(tabId);
   if (detach) chrome.debugger.detach({ tabId }, () => { void chrome.runtime.lastError; });
 }
 
@@ -199,6 +261,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
 /* ---- popup messaging ---- */
 function stateFor(tabId: number): TabState {
   const c = counts.get(tabId) ?? { console: 0, network: 0 };
+  const netMap = netTail.get(tabId);
   return {
     daemonConnected: port !== null,
     capturing: contexts.has(tabId),
@@ -206,7 +269,9 @@ function stateFor(tabId: number): TabState {
     url: pageUrls.get(tabId),
     sessionId: contexts.get(tabId)?.sessionId,
     consoleCount: c.console,
-    networkCount: c.network
+    networkCount: c.network,
+    network: netMap ? Array.from(netMap.values()) : [],
+    console: conTail.get(tabId) ?? []
   };
 }
 

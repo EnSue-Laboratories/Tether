@@ -1,0 +1,394 @@
+/* Tether popup — monochrome JetBrains Mono devtool aesthetic.
+   Design owner: @kira-pgr. v3.6 spec (see thread #Agents:ab6f8be6).
+   No remote font load; woff2 is vendored under fonts/ for offline + CSP safety. */
+
+@font-face {
+  font-family: 'JetBrains Mono';
+  src: url('fonts/JetBrainsMono-Regular.woff2') format('woff2');
+  font-weight: 400 500;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  src: url('fonts/JetBrainsMono-Bold.woff2') format('woff2');
+  font-weight: 600 800;
+  font-style: normal;
+  font-display: swap;
+}
+
+:root {
+  color-scheme: dark;
+  --bg-base: #000000;
+  --bg-soft: rgba(255, 255, 255, 0.03);
+  --text-primary: #FFFFFF;
+  --text-muted: #888888;
+  --text-dim: #555555;
+  --border-strong: #FFFFFF;
+  --top-bar: #A0A0A0;
+  --border-light: #2a2a2a;
+  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Courier New', monospace;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html,
+body {
+  width: 340px;
+  height: 540px;
+  background: var(--bg-base);
+  margin: 0;
+  padding: 0;
+}
+
+/* Author rules like `display: flex` on .empty-state override the UA
+ * `[hidden] { display: none }` rule, so `el.hidden = true` looks like a no-op.
+ * Forcing it here makes `hidden` actually hide. */
+[hidden] { display: none !important; }
+
+body {
+  font-family: var(--font-mono);
+  color: var(--text-primary);
+  font-size: 12px;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+}
+
+/* Square frame: Chrome action popups use a rectangular host surface, so the UI
+ * now embraces that shape instead of fighting it with rounded corners. */
+.popup-shell {
+  width: 340px;
+  height: 540px;
+  background: var(--bg-base);
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border-light);
+  border-top: 4px solid var(--top-bar);
+  border-radius: 0;
+  overflow: hidden;
+}
+
+/* ---- Header --------------------------------------------------------- */
+.header {
+  padding: 20px 18px 16px;
+  border-bottom: 1px solid var(--border-light);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+}
+.brand-group {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+/* Shared type so brand + switch + dot render at *exactly* the same metrics.
+ * Buttons inherit font: initial from the UA, so without these the channel
+ * switch ends up slightly shorter and the cap-heights drift. */
+.brand,
+.channel-switch,
+.brand-dot {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.22em;
+  line-height: 1;
+}
+.brand { color: var(--text-primary); }
+.brand-dot {
+  color: var(--text-dim);
+  transform: translateY(2px);
+  user-select: none;
+}
+/* The channel switch is a single text styled identically to TETHER so it reads
+ * as a sibling label. Clicking it cycles network ↔ console. */
+.channel-switch {
+  color: var(--text-primary);
+  background: transparent;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  user-select: none;
+  transition: opacity 0.12s;
+}
+.channel-switch:hover { opacity: 0.8; }
+.channel-switch:focus-visible {
+  outline: 1px solid var(--text-primary);
+  outline-offset: 3px;
+  border-radius: 2px;
+}
+
+/* ---- Capture switch ------------------------------------------------- */
+.capture-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: transparent;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+  user-select: none;
+}
+.capture-toggle:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+.capture-toggle-label {
+  font-size: 9.5px;
+  letter-spacing: 0.14em;
+  color: var(--text-muted);
+  font-weight: 500;
+}
+.capture-toggle[aria-checked="true"] .capture-toggle-label { color: var(--text-primary); }
+.toggle-track {
+  width: 32px;
+  height: 16px;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  position: relative;
+  transition: background-color 0.15s;
+  flex-shrink: 0;
+}
+.toggle-knob {
+  position: absolute;
+  top: 1px;
+  left: 1px;
+  width: 12px;
+  height: 12px;
+  background-color: var(--text-primary);
+  border-radius: 999px;
+  transition: left 0.15s, background-color 0.15s;
+}
+.capture-toggle[aria-checked="true"] .toggle-track { background-color: var(--text-primary); }
+.capture-toggle[aria-checked="true"] .toggle-knob {
+  left: 17px;
+  background-color: var(--bg-base);
+}
+.capture-toggle:focus-visible {
+  outline: 1px solid var(--text-primary);
+  outline-offset: 3px;
+  border-radius: 4px;
+}
+
+
+/* ---- Content + event list ----------------------------------------- */
+.content {
+  flex: 1 1 auto;
+  /* `min-height: 0` is the magic that lets a flex child actually shrink and
+   * scroll its own overflow instead of pushing the parent taller. */
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+.content::-webkit-scrollbar { width: 5px; }
+.content::-webkit-scrollbar-thumb { background: var(--border-light); border-radius: 10px; }
+
+.empty-state {
+  /* Fills the entire scrollable content area so the placeholder reads as
+   * "nothing here" rather than a stray header pinned to the top. Centered
+   * on both axes with center-aligned text — the leading "..." sits as its
+   * own line above the title. */
+  min-height: 100%;
+  padding: 14px 28px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  text-align: center;
+  gap: 8px;
+}
+.empty-state-dots {
+  font-size: 18px;
+  letter-spacing: 0.18em;
+  color: var(--text-muted);
+  line-height: 1;
+  margin-bottom: 2px;
+}
+.empty-state-title {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.empty-state-hint {
+  font-size: 10px;
+  color: var(--text-dim);
+  letter-spacing: 0.02em;
+  line-height: 1.55;
+  max-width: 240px;
+}
+
+.guide-line {
+  height: 1px;
+  margin: 70px 16px;
+  background-image: linear-gradient(to right, transparent, var(--border-light) 30%, var(--border-light) 70%, transparent);
+  opacity: 0.6;
+}
+
+/* ---- Event list ---------------------------------------------------- */
+.event-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.log-item {
+  border-bottom: 1px solid var(--border-light);
+}
+.log-summary {
+  padding: 8px 16px;
+  display: grid;
+  grid-template-columns: 44px 1fr auto;
+  gap: 10px;
+  align-items: baseline;
+  cursor: pointer;
+}
+.log-summary:hover { background-color: rgba(255, 255, 255, 0.04); }
+.log-item.is-expanded .log-summary { background-color: rgba(255, 255, 255, 0.05); }
+.method-tag {
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-align: left;
+  color: var(--text-muted);
+}
+.log-item.is-error .method-tag { color: var(--text-primary); }
+.log-details {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  overflow: hidden;
+  min-width: 0;
+  text-align: left;
+}
+.log-url {
+  font-size: 11px;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-align: left;
+}
+.log-meta {
+  font-size: 9.5px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-align: left;
+}
+.status {
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--text-primary);
+  font-feature-settings: "tnum" 1;
+}
+.log-item.is-pending .status { color: var(--text-dim); }
+.log-item.is-error .status { color: var(--text-primary); }
+.log-item.is-error .log-url { color: var(--text-primary); }
+.log-item.is-warn .method-tag { color: var(--text-primary); }
+
+/* ---- Expanded detail pane ------------------------------------------ */
+.log-pane {
+  padding: 10px 16px 12px;
+  background-color: rgba(255, 255, 255, 0.025);
+  border-top: 1px solid var(--border-light);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.pane-row {
+  display: grid;
+  grid-template-columns: 64px 1fr;
+  gap: 10px;
+  align-items: baseline;
+  font-size: 10px;
+  line-height: 1.45;
+}
+.pane-label {
+  color: var(--text-muted);
+  font-weight: 700;
+  letter-spacing: 0.06em;
+}
+.pane-value {
+  color: var(--text-primary);
+  word-break: break-all;
+}
+.pane-message {
+  color: var(--text-primary);
+  font-size: 10.5px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  padding-bottom: 2px;
+  border-bottom: 1px dashed var(--border-light);
+  margin-bottom: 2px;
+}
+
+/* ---- Footer ------------------------------------------------------- */
+.footer {
+  padding: 10px 16px;
+  border-top: 1px solid var(--border-light);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+.status-metrics { display: flex; gap: 6px; }
+.metric-box {
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-primary);
+  padding: 3px 8px;
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  transition: background-color 0.12s;
+  user-select: none;
+}
+.metric-box:hover { background-color: rgba(255, 255, 255, 0.06); }
+.metric-box[aria-pressed="true"] {
+  background-color: var(--text-primary);
+  color: var(--bg-base);
+}
+.metric-box:focus-visible {
+  outline: 1px solid var(--text-primary);
+  outline-offset: 2px;
+}
+.metric-box:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+.metric-label { font-weight: 600; }
+.metric-value { font-weight: 700; font-feature-settings: "tnum" 1; }
+
+.agent-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10.5px;
+  color: var(--text-primary);
+  letter-spacing: 0.04em;
+}
+.agent-status.paused { color: var(--text-muted); }
+.pulse-dot {
+  width: 6px;
+  height: 6px;
+  background-color: var(--text-primary);
+  border-radius: 50%;
+  animation: pulse 2s infinite;
+}
+.agent-status.paused .pulse-dot {
+  background-color: var(--text-muted);
+  animation: none;
+}
+@keyframes pulse {
+  0% { box-shadow: 0 0 0 0 rgba(255, 255, 255, 0.4); }
+  70% { box-shadow: 0 0 0 6px rgba(255, 255, 255, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(255, 255, 255, 0); }
+}

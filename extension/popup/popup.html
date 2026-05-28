@@ -1,27 +1,80 @@
 <!doctype html>
-<!-- Tether popup — minimal English UI (Phase 0 skeleton): status, capture toggle, current
-     tab/session, recent event counts. No dashboard (per design). -->
+<!-- Tether popup — monochrome JetBrains Mono devtool aesthetic (v3.6 design,
+     design owner @kira-pgr, see thread #Agents:ab6f8be6 / PR #X).
+     Existing TabState (daemonConnected / url / capturing / sessionId /
+     consoleCount / networkCount) drives the UI; event-list streaming is a
+     follow-up — for now the body shows status, channel selector, and counts. -->
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <style>
-      body { font: 13px/1.4 system-ui, sans-serif; width: 260px; margin: 0; padding: 12px; }
-      h1 { font-size: 14px; margin: 0 0 8px; }
-      .row { display: flex; justify-content: space-between; padding: 3px 0; }
-      .muted { color: #666; }
-      .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #c00; }
-      .dot.on { background: #0a0; }
-      button { width: 100%; margin-top: 10px; padding: 6px; }
-    </style>
+    <link rel="stylesheet" href="popup.css" />
   </head>
   <body>
-    <h1>Tether</h1>
-    <div class="row"><span>Daemon</span><span><span id="daemon-dot" class="dot"></span> <span id="daemon-text">disconnected</span></span></div>
-    <div class="row"><span>Tab</span><span id="tab-url" class="muted">—</span></div>
-    <div class="row"><span>Session</span><span id="session-id" class="muted">—</span></div>
-    <div class="row"><span>Console events</span><span id="console-count">0</span></div>
-    <div class="row"><span>Network events</span><span id="network-count">0</span></div>
-    <button id="toggle">Start capturing this tab</button>
+    <main class="popup-shell" aria-label="Tether capture popup">
+      <header class="header">
+        <div class="brand-group">
+          <div class="brand">TETHER</div>
+          <span class="brand-dot" aria-hidden="true">·</span>
+          <button
+            id="channel-switch"
+            class="channel-switch"
+            type="button"
+            aria-label="Switch channel"
+            data-channel="network"
+          >NETWORK</button>
+        </div>
+        <button
+          id="capture-toggle"
+          class="capture-toggle"
+          role="switch"
+          aria-checked="false"
+          aria-label="Toggle capture for this tab"
+        >
+          <span class="capture-toggle-label">CAPTURE</span>
+          <span class="toggle-track"><span class="toggle-knob"></span></span>
+        </button>
+      </header>
+
+      <div id="content" class="content">
+        <div id="empty-state" class="empty-state">
+          <div class="empty-state-dots" aria-hidden="true">...</div>
+          <div id="empty-title" class="empty-state-title">No capture in progress</div>
+          <div id="empty-hint" class="empty-state-hint">
+            Toggle CAPTURE on above to start recording this tab.
+            Live event details are available via the
+            <code>tether console</code> / <code>tether net</code> CLI.
+          </div>
+        </div>
+        <ul id="event-list" class="event-list" hidden></ul>
+      </div>
+
+      <footer class="footer">
+        <div class="status-metrics">
+          <button
+            id="filter-all"
+            class="metric-box"
+            aria-pressed="true"
+            aria-label="Show all events"
+          >
+            <span class="metric-label" id="metric-all-label">REQ</span>
+            <span class="metric-value" id="metric-all-count">0</span>
+          </button>
+          <button
+            id="filter-err"
+            class="metric-box"
+            aria-pressed="false"
+            aria-label="Filter to errors only"
+          >
+            <span class="metric-label">ERR</span>
+            <span class="metric-value" id="metric-err-count">0</span>
+          </button>
+        </div>
+        <div id="agent-status" class="agent-status paused">
+          <span id="agent-status-label">Paused</span>
+          <div class="pulse-dot"></div>
+        </div>
+      </footer>
+    </main>
     <script type="module" src="popup.js"></script>
   </body>
 </html>

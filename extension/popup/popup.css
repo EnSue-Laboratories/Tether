@@ -25,43 +25,97 @@
   --text-muted: #888888;
   --text-dim: #555555;
   --border-strong: #FFFFFF;
+  --top-bar: #A0A0A0;
   --border-light: #2a2a2a;
   --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Courier New', monospace;
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
-html, body { background: var(--bg-base); }
-
-/* Body IS the popup frame — Chrome's popup window clips to a rectangle, the
- * radius below is the visible card edge. Signature 48px top-left curve from
- * kira's design; other corners are crisp 12px. */
+html,
 body {
   width: 340px;
-  min-height: 480px;
+  height: 540px;
+  background: var(--bg-base);
+  margin: 0;
+  padding: 0;
+}
+
+/* Author rules like `display: flex` on .empty-state override the UA
+ * `[hidden] { display: none }` rule, so `el.hidden = true` looks like a no-op.
+ * Forcing it here makes `hidden` actually hide. */
+[hidden] { display: none !important; }
+
+body {
   font-family: var(--font-mono);
   color: var(--text-primary);
   font-size: 12px;
   -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+}
+
+/* Square frame: Chrome action popups use a rectangular host surface, so the UI
+ * now embraces that shape instead of fighting it with rounded corners. */
+.popup-shell {
+  width: 340px;
+  height: 540px;
+  background: var(--bg-base);
   display: flex;
   flex-direction: column;
-  border-radius: 48px 12px 12px 12px;
   border: 1px solid var(--border-light);
+  border-top: 4px solid var(--top-bar);
+  border-radius: 0;
   overflow: hidden;
 }
 
 /* ---- Header --------------------------------------------------------- */
 .header {
-  padding: 22px 18px 14px;
+  padding: 20px 18px 16px;
   border-bottom: 1px solid var(--border-light);
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 10px;
 }
-.brand {
+.brand-group {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+/* Shared type so brand + switch + dot render at *exactly* the same metrics.
+ * Buttons inherit font: initial from the UA, so without these the channel
+ * switch ends up slightly shorter and the cap-heights drift. */
+.brand,
+.channel-switch,
+.brand-dot {
+  font-family: var(--font-mono);
   font-size: 12px;
   font-weight: 700;
-  color: var(--text-primary);
   letter-spacing: 0.22em;
+  line-height: 1;
+}
+.brand { color: var(--text-primary); }
+.brand-dot {
+  color: var(--text-dim);
+  transform: translateY(2px);
+  user-select: none;
+}
+/* The channel switch is a single text styled identically to TETHER so it reads
+ * as a sibling label. Clicking it cycles network ↔ console. */
+.channel-switch {
+  color: var(--text-primary);
+  background: transparent;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  user-select: none;
+  transition: opacity 0.12s;
+}
+.channel-switch:hover { opacity: 0.8; }
+.channel-switch:focus-visible {
+  outline: 1px solid var(--text-primary);
+  outline-offset: 3px;
+  border-radius: 2px;
 }
 
 /* ---- Capture switch ------------------------------------------------- */
@@ -118,70 +172,50 @@ body {
   border-radius: 4px;
 }
 
-/* ---- Controls bar — Network / Console (right-aligned pills) -------- */
-.controls-bar {
-  padding: 10px 16px;
-  display: flex;
-  justify-content: flex-end;
-  align-items: center;
-  gap: 6px;
-  min-height: 44px;
-  border-bottom: 1px solid var(--border-light);
-}
-.channel-toggle {
-  display: flex;
-  gap: 6px;
-}
-.channel-btn {
-  border: 1px solid var(--border-strong);
-  border-radius: 4px;
-  background: transparent;
-  color: var(--text-primary);
-  padding: 4px 10px;
-  font-family: var(--font-mono);
-  font-size: 9.5px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  cursor: pointer;
-  user-select: none;
-  transition: background-color 0.12s;
-  text-transform: uppercase;
-  min-width: 84px;
-}
-.channel-btn:hover { background-color: rgba(255, 255, 255, 0.06); }
-.channel-btn[aria-selected="true"] {
-  background-color: var(--text-primary);
-  color: var(--bg-base);
-}
-.channel-btn:focus-visible {
-  outline: 1px solid var(--text-primary);
-  outline-offset: 2px;
-}
 
 /* ---- Content + event list ----------------------------------------- */
 .content {
-  flex: 1;
+  flex: 1 1 auto;
+  /* `min-height: 0` is the magic that lets a flex child actually shrink and
+   * scroll its own overflow instead of pushing the parent taller. */
+  min-height: 0;
   overflow-y: auto;
-  min-height: 200px;
+  overflow-x: hidden;
 }
 .content::-webkit-scrollbar { width: 5px; }
 .content::-webkit-scrollbar-thumb { background: var(--border-light); border-radius: 10px; }
 
 .empty-state {
-  padding: 14px 18px;
+  /* Fills the entire scrollable content area so the placeholder reads as
+   * "nothing here" rather than a stray header pinned to the top. Centered
+   * on both axes with center-aligned text — the leading "..." sits as its
+   * own line above the title. */
+  min-height: 100%;
+  padding: 14px 28px;
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  justify-content: center;
+  align-items: center;
+  text-align: center;
+  gap: 8px;
+}
+.empty-state-dots {
+  font-size: 18px;
+  letter-spacing: 0.18em;
+  color: var(--text-muted);
+  line-height: 1;
+  margin-bottom: 2px;
 }
 .empty-state-title {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-muted);
 }
 .empty-state-hint {
-  font-size: 9.5px;
+  font-size: 10px;
   color: var(--text-dim);
   letter-spacing: 0.02em;
-  line-height: 1.5;
+  line-height: 1.55;
+  max-width: 240px;
 }
 
 .guide-line {
@@ -191,29 +225,40 @@ body {
   opacity: 0.6;
 }
 
-/* Live event row (reserved for future event streaming) */
+/* ---- Event list ---------------------------------------------------- */
+.event-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
 .log-item {
-  padding: 9px 16px;
   border-bottom: 1px solid var(--border-light);
+}
+.log-summary {
+  padding: 8px 16px;
   display: grid;
-  grid-template-columns: 40px 1fr auto;
+  grid-template-columns: 44px 1fr auto;
   gap: 10px;
   align-items: baseline;
   cursor: pointer;
 }
-.log-item:hover { background-color: rgba(255, 255, 255, 0.04); }
+.log-summary:hover { background-color: rgba(255, 255, 255, 0.04); }
+.log-item.is-expanded .log-summary { background-color: rgba(255, 255, 255, 0.05); }
 .method-tag {
-  font-size: 10px;
+  font-size: 9.5px;
   font-weight: 700;
-  text-align: right;
-  color: var(--text-primary);
+  letter-spacing: 0.04em;
+  text-align: left;
+  color: var(--text-muted);
 }
+.log-item.is-error .method-tag { color: var(--text-primary); }
 .log-details {
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: 2px;
   overflow: hidden;
   min-width: 0;
+  text-align: left;
 }
 .log-url {
   font-size: 11px;
@@ -221,15 +266,62 @@ body {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  text-align: left;
 }
 .log-meta {
   font-size: 9.5px;
   color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-align: left;
 }
 .status {
   font-size: 10.5px;
   font-weight: 600;
   color: var(--text-primary);
+  font-feature-settings: "tnum" 1;
+}
+.log-item.is-pending .status { color: var(--text-dim); }
+.log-item.is-error .status { color: var(--text-primary); }
+.log-item.is-error .log-url { color: var(--text-primary); }
+.log-item.is-warn .method-tag { color: var(--text-primary); }
+
+/* ---- Expanded detail pane ------------------------------------------ */
+.log-pane {
+  padding: 10px 16px 12px;
+  background-color: rgba(255, 255, 255, 0.025);
+  border-top: 1px solid var(--border-light);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.pane-row {
+  display: grid;
+  grid-template-columns: 64px 1fr;
+  gap: 10px;
+  align-items: baseline;
+  font-size: 10px;
+  line-height: 1.45;
+}
+.pane-label {
+  color: var(--text-muted);
+  font-weight: 700;
+  letter-spacing: 0.06em;
+}
+.pane-value {
+  color: var(--text-primary);
+  word-break: break-all;
+}
+.pane-message {
+  color: var(--text-primary);
+  font-size: 10.5px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  padding-bottom: 2px;
+  border-bottom: 1px dashed var(--border-light);
+  margin-bottom: 2px;
 }
 
 /* ---- Footer ------------------------------------------------------- */

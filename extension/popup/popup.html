@@ -10,8 +10,19 @@
     <link rel="stylesheet" href="popup.css" />
   </head>
   <body>
+    <main class="popup-shell" aria-label="Tether capture popup">
       <header class="header">
-        <div class="brand">TETHER</div>
+        <div class="brand-group">
+          <div class="brand">TETHER</div>
+          <span class="brand-dot" aria-hidden="true">·</span>
+          <button
+            id="channel-switch"
+            class="channel-switch"
+            type="button"
+            aria-label="Switch channel"
+            data-channel="network"
+          >NETWORK</button>
+        </div>
         <button
           id="capture-toggle"
           class="capture-toggle"
@@ -24,37 +35,17 @@
         </button>
       </header>
 
-      <div class="controls-bar">
-        <div class="channel-toggle" role="tablist" aria-label="Event channel">
-          <button
-            id="channel-network"
-            class="channel-btn"
-            role="tab"
-            aria-selected="true"
-            data-channel="network"
-          >Network</button>
-          <button
-            id="channel-console"
-            class="channel-btn"
-            role="tab"
-            aria-selected="false"
-            data-channel="console"
-          >Console</button>
-        </div>
-      </div>
-
       <div id="content" class="content">
         <div id="empty-state" class="empty-state">
-          <div id="empty-title" class="empty-state-title">— No capture in progress</div>
-          <div class="empty-state-hint">
+          <div class="empty-state-dots" aria-hidden="true">...</div>
+          <div id="empty-title" class="empty-state-title">No capture in progress</div>
+          <div id="empty-hint" class="empty-state-hint">
             Toggle CAPTURE on above to start recording this tab.
             Live event details are available via the
             <code>tether console</code> / <code>tether net</code> CLI.
           </div>
         </div>
-        <div class="guide-line"></div>
-        <div class="guide-line"></div>
-        <div class="guide-line"></div>
+        <ul id="event-list" class="event-list" hidden></ul>
       </div>
 
       <footer class="footer">
@@ -83,6 +74,7 @@
           <div class="pulse-dot"></div>
         </div>
       </footer>
+    </main>
     <script type="module" src="popup.js"></script>
   </body>
 </html>

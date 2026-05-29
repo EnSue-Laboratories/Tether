@@ -46,3 +46,31 @@ export interface TabState {
 export type PopupRequest =
   | { type: "getState"; tabId: number }
   | { type: "toggleCapture"; tabId: number };
+
+/* Background → content-script message: render a top-center error toast.
+ * Fired for 5xx responses and non-asset network failures on captured tabs. */
+export interface ToastMessage {
+  type: "toast";
+  /** CDP requestId — used by the content script to dedup retries. */
+  requestId: string;
+  /** HTTP status if the response phase landed; absent for failed phase. */
+  status?: number;
+  method?: string;
+  url: string;
+  /** CDP errorText for failed phase, e.g. "net::ERR_CONNECTION_REFUSED". */
+  errorText?: string;
+}
+
+/* Background → content-script follow-up: attach a body excerpt to an
+ * existing toast once Network.getResponseBody returns. May arrive after the
+ * toast was auto-dismissed; in that case the content script no-ops. */
+export interface ToastDetailMessage {
+  type: "toast-detail";
+  requestId: string;
+  /** Decoded body string (utf-8). base64 binary bodies are filtered out
+   *  by the background side and never sent here. */
+  body: string;
+  bodyTruncated?: boolean;
+  /** Hint for rendering: "json" if the body parsed as JSON, else "text". */
+  kind: "json" | "text";
+}

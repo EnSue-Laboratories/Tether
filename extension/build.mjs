@@ -6,5 +6,7 @@ const common = { bundle: true, format: "esm", target: "chrome116", logLevel: "in
 
 await esbuild.build({ ...common, entryPoints: ["src/background.ts"], outfile: "background.js" });
 await esbuild.build({ ...common, entryPoints: ["popup/popup.ts"], outfile: "popup/popup.js" });
+/* Content scripts can't use ESM `import` at runtime, so bundle as IIFE. */
+await esbuild.build({ ...common, format: "iife", entryPoints: ["src/toast.ts"], outfile: "content/toast.js" });
 
-console.log("Tether extension built: background.js, popup/popup.js");
+console.log("Tether extension built: background.js, popup/popup.js, content/toast.js");

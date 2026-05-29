@@ -9,6 +9,7 @@ dist/
 # esbuild outputs (run `npm run build` in extension/)
 /extension/background.js
 /extension/popup/popup.js
+/extension/content/
 
 # Editor / OS
 .DS_Store

@@ -16,7 +16,7 @@ import {
   mapWsClosed, mapWsCreated, mapWsFrameError, mapWsFrameReceived, mapWsFrameSent,
   mapWsHandshakeRequest, mapWsHandshakeResponse
 } from "./capture.js";
-import { PopupConsoleRow, PopupNetworkRow, PopupRequest, TabState } from "./messages.js";
+import { PopupConsoleRow, PopupNetworkRow, PopupRequest, TabState, ToastDetailMessage, ToastMessage } from "./messages.js";
 
 const NATIVE_HOST = "com.ensue.tether";
 const CDP_VERSION = "1.3";
@@ -73,8 +73,111 @@ function emit(ev: IngestEvent | null): void {
   } else if (ev.type === "network") {
     if (ev.phase === "request") bump(ev.tabId, "network");
     updateNetworkTail(ev.tabId, ev);
+    maybeToast(ev);
   }
   if (!flushTimer) flushTimer = setTimeout(flush, FLUSH_MS);
+}
+
+/* Surface a toast in the page when a captured tab sees a failing API call.
+ * Triggers: 5xx on any document/xhr/fetch/script/websocket request, 4xx on
+ * xhr/fetch (app-initiated API calls — your backend, Stripe, etc.), and real
+ * network failures. Asset 4xx/5xx, document/script 4xx (SPA route misses),
+ * user-initiated aborts, and extension blocks are filtered out. The daemon
+ * still receives every event regardless. */
+const TOAST_RESOURCE_TYPES = new Set(["document", "xhr", "fetch", "script", "websocket"]);
+const API_RESOURCE_TYPES = new Set(["xhr", "fetch"]);
+const TOAST_QUIET_ERRORS = new Set([
+  "net::ERR_ABORTED",          // navigation cancelled mid-flight
+  "net::ERR_BLOCKED_BY_CLIENT" // ad-block / DNT blocked
+]);
+
+/* Per-request method, kept until the response body either arrives or the
+ * request fails. CDP only carries `method` on Network.requestWillBeSent, so
+ * we cache it here to enrich the response-phase toast. */
+const requestMethods = new Map<string, string>();
+/* requestIds that triggered a toast; used to gate the body-phase follow-up so
+ * we only forward bodies for toasted requests. Bounded to keep memory honest. */
+const toastedRequests = new Set<string>();
+const TOASTED_MAX = 256;
+
+function detailFromBody(body: string): { body: string; kind: "json" | "text"; truncated: boolean } | null {
+  const trimmed = body.trim();
+  if (!trimmed) return null;
+  const MAX = 240;
+  try {
+    const parsed = JSON.parse(trimmed) as unknown;
+    const oneLine = JSON.stringify(parsed);
+    if (oneLine.length <= MAX) return { body: oneLine, kind: "json", truncated: false };
+    if (parsed && typeof parsed === "object") {
+      for (const k of ["error", "message", "detail", "title", "error_description"]) {
+        const v = (parsed as Record<string, unknown>)[k];
+        if (typeof v === "string" && v.length > 0) {
+          const out = v.length > MAX ? v.slice(0, MAX) : v;
+          return { body: out, kind: "text", truncated: v.length > MAX };
+        }
+      }
+    }
+    return { body: oneLine.slice(0, MAX), kind: "json", truncated: true };
+  } catch {
+    if (trimmed.length <= MAX) return { body: trimmed, kind: "text", truncated: false };
+    return { body: trimmed.slice(0, MAX), kind: "text", truncated: true };
+  }
+}
+
+function maybeToast(ev: import("./capture.js").NetworkEvent): void {
+  if (!contexts.has(ev.tabId)) return;
+
+  // Body-phase follow-up: if this requestId triggered a toast and the body is
+  // text (not binary), forward an excerpt so the toast can grow with detail.
+  if (ev.phase === "body") {
+    if (!toastedRequests.has(ev.requestId)) return;
+    toastedRequests.delete(ev.requestId);
+    if (!ev.body || ev.bodyBase64) return;
+    const detail = detailFromBody(ev.body);
+    if (!detail) return;
+    const msg: ToastDetailMessage = {
+      type: "toast-detail",
+      requestId: ev.requestId,
+      body: detail.body,
+      bodyTruncated: detail.truncated || ev.bodyTruncated,
+      kind: detail.kind
+    };
+    try { chrome.tabs.sendMessage(ev.tabId, msg, () => void chrome.runtime.lastError); } catch { /* no receiver */ }
+    return;
+  }
+
+  const rt = ev.resourceType;
+  const interesting = !rt || TOAST_RESOURCE_TYPES.has(rt);
+  const status = ev.status ?? 0;
+  const isServerErr = ev.phase === "response" && status >= 500 && interesting;
+  const isApiClientErr = ev.phase === "response" && status >= 400 && status < 500 &&
+    !!rt && API_RESOURCE_TYPES.has(rt);
+  const isNetFail = ev.phase === "failed" && !!ev.errorText && interesting &&
+    !TOAST_QUIET_ERRORS.has(ev.errorText);
+  if (!isServerErr && !isApiClientErr && !isNetFail) return;
+
+  if (isServerErr || isApiClientErr) {
+    // Mark for body-phase enrichment. Bound the set; oldest entry drops first.
+    if (toastedRequests.size >= TOASTED_MAX) {
+      const oldest = toastedRequests.values().next();
+      if (!oldest.done) toastedRequests.delete(oldest.value);
+    }
+    toastedRequests.add(ev.requestId);
+  }
+
+  const msg: ToastMessage = {
+    type: "toast",
+    requestId: ev.requestId,
+    status: ev.status,
+    method: ev.method ?? requestMethods.get(ev.requestId),
+    url: ev.url,
+    errorText: ev.errorText
+  };
+  try {
+    chrome.tabs.sendMessage(ev.tabId, msg, () => void chrome.runtime.lastError);
+  } catch {
+    // chrome:// pages, the Web Store, PDF viewers etc. have no content script — ignore.
+  }
 }
 
 function pushConsoleTail(tabId: number, ev: import("./capture.js").ConsoleEvent): void {
@@ -155,6 +258,15 @@ function enableCapture(tabId: number): void {
       maxTotalBufferSize: 100 * 1024 * 1024
     });
     chrome.debugger.sendCommand({ tabId }, "Log.enable");
+    /* Manifest content scripts only inject on fresh page loads, so any tab open
+     * before the extension was (re)loaded has no toast listener. Inject now so
+     * the very first error after toggling CAPTURE is delivered. A sentinel in
+     * toast.ts guards against double-registration if the manifest version is
+     * already present. */
+    chrome.scripting.executeScript({
+      target: { tabId, allFrames: false },
+      files: ["content/toast.js"]
+    }).catch(() => { /* chrome://, web store, file:// — no content scripts allowed */ });
     connectDaemon();
     chrome.tabs.get(tabId, (tab) => {
       void chrome.runtime.lastError;
@@ -204,8 +316,9 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
     case "Runtime.exceptionThrown":  emit(mapExceptionThrown(p, ctx, pageUrl)); break;
     case "Log.entryAdded":           emit(mapLogEntryAdded(p, ctx, pageUrl)); break;
     case "Network.requestWillBeSent": {
-      const req = p as { requestId: string; request: { url: string } };
+      const req = p as { requestId: string; request: { url: string; method: string } };
       bodyUrls.set(req.requestId, req.request.url);
+      requestMethods.set(req.requestId, req.request.method);
       emit(mapRequestWillBeSent(p, ctx));
       break;
     }
@@ -219,6 +332,7 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
       const req = p as { requestId: string };
       bodyUrls.delete(req.requestId);
       emit(mapLoadingFailed(p, ctx));
+      requestMethods.delete(req.requestId);
       break;
     }
     case "Network.loadingFinished": {
@@ -229,9 +343,11 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
         void fetchResponseBody(tabId, req.requestId).then((b) => {
           if (b && b.body) emit(buildBodyEvent(ctx, req.requestId, url, b.body, b.base64Encoded));
           bodyUrls.delete(req.requestId);
+          requestMethods.delete(req.requestId);
         });
       } else {
         bodyUrls.delete(req.requestId);
+        requestMethods.delete(req.requestId);
       }
       break;
     }

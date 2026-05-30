@@ -153,6 +153,27 @@ interface CdpExceptionThrown {
   exceptionDetails: { text: string; url?: string; exception?: CdpRemoteObject; stackTrace?: CdpStackTrace };
 }
 
+/* CDP `Runtime.exceptionThrown` splits an uncaught error across two fields: `text` is just the
+ * bare prefix ("Uncaught", or "Uncaught (in promise)"), and the real message + type live in
+ * `exception.description` ("TypeError: x is not a function\n    at ..."). A thrown primitive
+ * (string/number) has no description and carries its content in `exception.value` instead.
+ * Compose the DevTools-style headline ("Uncaught TypeError: ...") rather than surfacing the
+ * bare "Uncaught", which is what issue #14 reported. */
+function exceptionText(d: CdpExceptionThrown["exceptionDetails"]): string {
+  const prefix = d.text?.trim();
+  const desc = d.exception?.description;
+  if (desc) {
+    const head = desc.split("\n", 1)[0].trim();
+    if (head) return prefix && !head.startsWith(prefix) ? `${prefix} ${head}` : head;
+  }
+  const val = d.exception?.value;
+  if (val !== undefined) {
+    const v = typeof val === "string" ? val : JSON.stringify(val);
+    return prefix ? `${prefix} ${v}` : v;
+  }
+  return prefix || "Uncaught exception";
+}
+
 function argText(a: CdpRemoteObject): string {
   if (a.value !== undefined) return typeof a.value === "string" ? a.value : JSON.stringify(a.value);
   if (a.unserializableValue) return a.unserializableValue;
@@ -180,7 +201,7 @@ export function mapExceptionThrown(p: CdpExceptionThrown, ctx: CaptureContext, p
   const d = p.exceptionDetails;
   return {
     ...envelope(ctx, "console", p.timestamp), type: "console", level: "error",
-    text: d.text || d.exception?.description || "Uncaught exception",
+    text: exceptionText(d),
     stack: stackText(d.stackTrace) ?? d.exception?.description,
     url: d.url ?? pageUrl, source: "exception"
   };

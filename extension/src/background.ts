@@ -5,9 +5,14 @@
  * daemon `control` config. See ../../docs/DESIGN.md §3.1.
  *
  * NOTE (MV3): in-memory state (contexts/counts) lives only as long as the service worker. An
- * attached debugger keeps the worker alive during active capture, so state persists while
- * capturing; on an idle-worker restart, capture is re-established when the user toggles again.
- * (Persisting sessions across worker restarts is a possible follow-up.) */
+ * attached debugger usually keeps the worker alive during active capture, but Chrome can still
+ * terminate an idle worker (e.g. a quiet page with no console/network traffic). When that happens
+ * the debugger detaches and capture silently stops — issue #15 ("extension sometimes would
+ * abruptly fail"). To make capture self-healing we (1) persist the set of capturing tabIds to
+ * chrome.storage.session, (2) re-establish capture on worker startup and on a keepalive alarm,
+ * and (3) keep a recurring alarm so the worker is woken periodically while capturing. Session
+ * storage is intentionally per-browser-session: it survives worker restarts but clears on browser
+ * exit, so capture never silently resurrects across a full restart. */
 
 import {
   buildBodyEvent, CaptureConfig, CaptureContext, ControlMessage, DEFAULT_CONFIG, IngestEvent,
@@ -23,6 +28,8 @@ const CDP_VERSION = "1.3";
 const FLUSH_MS = 500;
 const MAX_QUEUE = 10000; // bound the outbound queue if the daemon is unreachable
 const POPUP_TAIL = 100;  // popup-only recent-event window (per tab, per channel)
+const KEEPALIVE_ALARM = "tether-keepalive"; // wakes the worker while capturing (see header note)
+const CAPTURING_KEY = "tether.capturingTabs"; // chrome.storage.session key: number[] of tabIds
 
 let port: chrome.runtime.Port | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -240,6 +247,65 @@ function flush(): void {
   try { port.postMessage(msg); queue = []; } catch { port = null; scheduleReconnect(); }
 }
 
+/* ---- worker-restart resilience (issue #15) ---- */
+/* Mirror the live set of capturing tabIds into session storage so a restarted
+ * worker can re-attach. Called whenever `contexts` membership changes. */
+function persistCapturing(): void {
+  try {
+    chrome.storage.session.set({ [CAPTURING_KEY]: [...contexts.keys()] }, () => void chrome.runtime.lastError);
+  } catch { /* storage unavailable — recovery is best-effort */ }
+}
+
+/* Keep a recurring alarm alive exactly while we're capturing. The alarm both
+ * wakes an idle worker (so capture resumes promptly after a restart) and gives
+ * the worker periodic activity. 0.5 min is Chrome's minimum alarm period. */
+function syncKeepalive(): void {
+  if (contexts.size > 0) chrome.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: 0.5 });
+  else chrome.alarms.clear(KEEPALIVE_ALARM, () => void chrome.runtime.lastError);
+}
+
+/* Re-attach capture for every persisted tab not already live. Runs on worker
+ * startup and on each keepalive alarm; a no-op once everything is attached.
+ * Tabs that have since closed are pruned from the persisted set. */
+function recoverCapturing(): void {
+  try {
+    chrome.storage.session.get(CAPTURING_KEY, (data) => {
+      if (chrome.runtime.lastError || !data) return;
+      const stored = data[CAPTURING_KEY];
+      const tabIds = Array.isArray(stored) ? stored.filter((n): n is number => typeof n === "number") : [];
+      // Nothing to capture (e.g. session storage cleared on browser restart) —
+      // make sure no durable keepalive alarm keeps ticking pointlessly.
+      if (tabIds.length === 0 && contexts.size === 0) {
+        chrome.alarms.clear(KEEPALIVE_ALARM, () => void chrome.runtime.lastError);
+        return;
+      }
+      for (const tabId of tabIds) {
+        if (contexts.has(tabId)) continue;
+        chrome.tabs.get(tabId, (tab) => {
+          if (chrome.runtime.lastError || !tab) { prunePersisted(tabId); return; }
+          enableCapture(tabId);
+        });
+      }
+    });
+  } catch { /* storage unavailable */ }
+}
+
+/* Drop a single tabId from the persisted set (a tab that closed while the
+ * worker was asleep, so chrome.tabs.onRemoved never fired for it). */
+function prunePersisted(tabId: number): void {
+  try {
+    chrome.storage.session.get(CAPTURING_KEY, (data) => {
+      if (chrome.runtime.lastError || !data) return;
+      const stored = data[CAPTURING_KEY];
+      if (!Array.isArray(stored)) return;
+      const next = stored.filter((n) => n !== tabId);
+      if (next.length !== stored.length) {
+        chrome.storage.session.set({ [CAPTURING_KEY]: next }, () => void chrome.runtime.lastError);
+      }
+    });
+  } catch { /* storage unavailable */ }
+}
+
 /* ---- capture lifecycle ---- */
 function newSessionId(): string {
   return "s_" + (crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).slice(2));
@@ -252,6 +318,8 @@ function enableCapture(tabId: number): void {
     const ctx: CaptureContext = { tabId, sessionId: newSessionId(), config, reqInfo: new Map() };
     contexts.set(tabId, ctx);
     counts.set(tabId, { console: 0, network: 0 });
+    persistCapturing();
+    syncKeepalive();
     chrome.debugger.sendCommand({ tabId }, "Runtime.enable");
     chrome.debugger.sendCommand({ tabId }, "Network.enable", {
       maxResourceBufferSize: 10 * 1024 * 1024,
@@ -286,6 +354,8 @@ function disableCapture(tabId: number, detach = true): void {
   counts.delete(tabId);
   netTail.delete(tabId);
   conTail.delete(tabId);
+  persistCapturing();
+  syncKeepalive();
   if (detach) chrome.debugger.detach({ tabId }, () => { void chrome.runtime.lastError; });
 }
 
@@ -362,6 +432,14 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
   }
 });
 
+/* ---- worker lifecycle (issue #15) ---- */
+/* Re-establish capture on each keepalive tick. After an idle-worker restart the
+ * alarm is one of the events that wakes us; recoverCapturing() then re-attaches
+ * the debugger for any tab that was capturing. A no-op once everything is live. */
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === KEEPALIVE_ALARM) recoverCapturing();
+});
+
 /* ---- tab lifecycle ---- */
 chrome.tabs.onRemoved.addListener((tabId) => disableCapture(tabId, false));
 chrome.debugger.onDetach.addListener((source) => {
@@ -401,3 +479,8 @@ chrome.runtime.onMessage.addListener((req: PopupRequest, _sender, sendResponse) 
   sendResponse(stateFor(req.tabId)); // getState
   return false;
 });
+
+/* Top-level: runs on every worker start, including an idle restart. If a prior
+ * session was capturing (persisted in chrome.storage.session), re-attach now so
+ * capture resumes without the user having to toggle CAPTURE again (issue #15). */
+recoverCapturing();
